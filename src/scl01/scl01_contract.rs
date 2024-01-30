@@ -182,10 +182,21 @@ impl SCL01Contract {
             }
 
             let last_index = receivers.len() - 1;
-            drips.insert(receivers[last_index].0.clone(),new_drips);
+            let mut drip_ret = 0;
+            if !new_drips.is_empty() {
+                let last_receiver = &receivers[last_index].0.clone();       
+                drips.insert(last_receiver.clone(), new_drips);
+                let blocks_dripped = owners_amount - total_value;
+            
+                if let Some(owned) = self.owners.get_mut(last_receiver) {
+                    *owned += blocks_dripped;
+                    drip_ret = *owned;
+                }
+            }
+            
+            
 
             let mut recievers_drips_present: Vec<bool> = Vec::new(); 
-            let mut drip_ret = 0;
             for entry in receivers.clone() {
                 match self.owners.get(&entry.0) {
                     Some(&e) => self.owners.insert(entry.0.clone(), &e + entry.1),
@@ -193,18 +204,6 @@ impl SCL01Contract {
                 };
 
                 if drips.contains_key(&entry.0) {
-                    let blocks_dripped = owners_amount - total_value;
-                    match self.owners.get(&entry.0) {
-                        Some(&e) => {
-                            self.owners.insert(entry.0.clone(), &e + blocks_dripped);
-                            drip_ret = &e + blocks_dripped;
-                        },
-                        None => {
-                            self.owners.insert(entry.0.clone(), entry.1);
-                            drip_ret = entry.1;
-                        }
-                    };
-
                     recievers_drips_present.push(true);
                 }else{
                     recievers_drips_present.push(false);
@@ -263,6 +262,7 @@ impl SCL01Contract {
 
 
             let mut drippers: Vec<(String, u64)> =  Vec::new();
+            let mut block_drip = 0;
             for entry in receivers.clone() {
                 let drip_amt = (entry.1.0)/(entry.1.1);
                 let drip = Drip{
@@ -287,11 +287,12 @@ impl SCL01Contract {
                     }
                 }
 
+                block_drip += drip_amt;
                 drippers.push(drip_balance);
         }
         
         self.drips = Some(d);
-        self.supply -= total_value;
+        self.supply -= total_value - block_drip;
         self.payloads.insert(txid.to_string(), payload.to_string());
         return Ok((drippers, new_owner));
         }
@@ -310,8 +311,13 @@ impl SCL01Contract {
             let mut updated_drips: Vec<Drip> = Vec::new();
             let mut new_owner = (utxo.to_string(),0, true);
             for mut drip in drips_on_utxo{
-                let mut drip_amount = (current_block_height - drip.last_block_dripped) * drip.drip_amount;
-                if current_block_height == drip.block_end && ((drip.block_end  - drip.start_block) + 1) * drip.drip_amount < drip.amount  {
+                let mut current_block = current_block_height;
+                if current_block_height > drip.block_end {
+                    current_block = drip.block_end
+                }
+
+                let mut drip_amount = (current_block - drip.last_block_dripped) * drip.drip_amount;
+                if current_block == drip.block_end && ((drip.block_end  - drip.start_block) + 1) * drip.drip_amount < drip.amount  {
                     drip_amount += drip.amount - (drip.block_end  - drip.start_block + 1) * drip.drip_amount;
                 }
 
@@ -327,8 +333,8 @@ impl SCL01Contract {
                 }
 
                 self.supply += drip_amount;
-                drip.last_block_dripped = current_block_height;
-                if current_block_height != drip.block_end {
+                drip.last_block_dripped = current_block;
+                if current_block < drip.block_end {
                     updated_drips.push(drip);
                 }else{
                     new_owner.2 = false;
@@ -392,6 +398,7 @@ impl SCL01Contract {
         if sender_utxos.len() == 0 {
             return Err("list: no senders".to_string());
         }
+
         let mut new_owner = (new_listing.change_utxo.to_string(),0,false);
 
         if new_listing.list_amt <= owners_amount {
@@ -411,7 +418,7 @@ impl SCL01Contract {
                         let new_drip = Drip {
                             block_end: drip.block_end.clone(),
                             drip_amount: drip.drip_amount.clone(),
-                            amount: drip.amount.clone(),
+                            amount: drip.amount.clone() - (current_block_height - drip.start_block) * drip.drip_amount,
                             start_block: current_block_height,
                             last_block_dripped:current_block_height.clone()
                         };
@@ -697,6 +704,9 @@ impl SCL01Contract {
 
         if pending {
            p_c.insert(receiver.to_string(), airdrop_amount);
+           if let Some(owned) = self.owners.get(receiver){
+                owner_amount += owned;    
+           }
         } else {
             p_c.remove(receiver);
             match self.owners.get(receiver) {

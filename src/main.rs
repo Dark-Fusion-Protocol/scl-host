@@ -100,9 +100,13 @@ async fn main() {
         .and(warp::path("contracts"))
         .and_then(handle_get_contracts);
 
+    let get_coin_drops = warp::get()
+        .and(warp::path("coin_drops"))
+        .and_then(handle_coin_drop_request);
+
     let get_meme_contracts = warp::get()
         .and(warp::path("meme_mints"))
-        .and_then(handle_meme_mints_request);
+        .and_then(handle_coin_drop_request);
 
     // Check server directories and files
     if !fs::metadata("./Json").is_ok() {
@@ -111,8 +115,8 @@ async fn main() {
     if !fs::metadata("./Json/Backups").is_ok() {
         fs::create_dir("./Json/Backups").expect("Failed to create Backup directory");
     }
-    if !fs::metadata("./Json/Queues/Claims").is_ok() {
-        fs::create_dir("./Json/Queues/Claims").expect("Failed to create Backup directory");
+    if !fs::metadata("./Json/UTXOS").is_ok() {
+        fs::create_dir("./Json/UTXOS").expect("Failed to create Backup directory");
     }
     if !fs::metadata(&QUEUESPATH).is_ok() {
         fs::create_dir(&QUEUESPATH).expect("Failed to create Queue directory");
@@ -125,6 +129,9 @@ async fn main() {
     }
     if !fs::metadata(&PENDINGCOMMANDSPATH).is_ok() {
         fs::create_dir(&PENDINGCOMMANDSPATH).expect("Failed to create pending commands directory");
+    }
+    if !fs::metadata("./Json/Queues/Claims").is_ok() {
+        fs::create_dir("./Json/Queues/Claims").expect("Failed to create Claims directory");
     }
 
     if !fs::metadata(&"./Json/config.txt").is_ok() {
@@ -150,6 +157,7 @@ async fn main() {
         .or(get_contract_field_paged)
         .or(get_health)
         .or(get_contracts_route)
+        .or(get_coin_drops)
         .or(get_utxo_data)
         .or(get_contract_history)
         .or(get_meme_contracts)
@@ -543,7 +551,7 @@ async fn handle_check_contract_summaries_request(mut contract_ids: Vec<String>) 
     return Ok(warp::reply::html(results));
 }
 
-async fn handle_meme_mints_request() -> Result<impl Reply, Rejection> {
+async fn handle_coin_drop_request() -> Result<impl Reply, Rejection> {
     let mut results = "[".to_string();
     let contract_ids = match read_server_config(){
         Ok(config) => config.memes,
