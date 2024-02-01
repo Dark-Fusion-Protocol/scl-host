@@ -384,8 +384,8 @@ pub fn perform_airdrop_split(mut contract: SCL01Contract){
         write_to_file(format!("./Json/UTXOS/{}.txt", &owner.0),data.clone()); 
     }
 
-    let _ = save_contract_scl01(&contract, "Airdrop Split", "", true);
-    let _ = save_contract_scl01(&contract, "Airdrop Split", "", false);
+    let _ = save_contract_scl01(&contract, "", "", true);
+    let _ = save_contract_scl01(&contract, "", "", false);
 }
 
 pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String) {

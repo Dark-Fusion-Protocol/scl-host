@@ -172,7 +172,7 @@ async fn main() {
         );
 
     let mut pending_start_time = Instant::now();
-    let pending_target_duration = Duration::from_secs(60);
+    let pending_target_duration = Duration::from_secs(5);
     let _payload = tokio::spawn(async move {
         loop {
             let item_string = match dequeue_item(TXCOMMANDSPATH) {
@@ -362,8 +362,7 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
             Ok(res) => res,
             Err(_) => return Err(reject::custom(CustomError { message: "Unable to add pending command to queue".to_string()})),
         };
-    
-        great_sort().await;
+
         save_command_backup(&req, true);
     } else {       
         let command_str = match serde_json::to_string(&req) {
@@ -1044,10 +1043,10 @@ async fn perform_contracts_checks() -> Result<String, String> {
                     Some(contract_id) => contract_id,
                     None => continue,
                 };
-                
+
+		        _ = perform_drips_scl01(contract_id.clone(), current_block as u64, false);                
                 _ = check_listings_fulfillents(&contract_id).await;
                 _ = check_airdrop_splits(&contract_id);
-                _ = perform_drips_scl01(contract_id, current_block as u64, false);
             }
         }
     }
@@ -2028,8 +2027,12 @@ fn get_scl01_contract_summary(contract: &SCL01Contract) -> Result<String, String
                     Some(current_airdrops) => current_airdrops,
                     None => 0,
                 };
-
-                available_airdrops = Some(airdrop_amount *(total_airdrops - current_airdrops));
+                
+		        if current_airdrops >= total_airdrops {
+		            available_airdrops = Some(0);
+		        }else {
+		            available_airdrops = Some(airdrop_amount * (total_airdrops - current_airdrops));
+		        }
             }
 
             summary.contract_id = contract.contractid.clone();

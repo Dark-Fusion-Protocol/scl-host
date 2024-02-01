@@ -728,9 +728,9 @@ impl SCL01Contract {
     }
 
     pub fn airdop_split(&mut self) -> Result<Vec<(String, u64)>, String> {
-        let mut current_airdrops = match self.current_airdrops.clone() {
-            Some(current_airdrops) => current_airdrops,
-            None =>  return  Err("airdop_split: no airdrops".to_string()),
+        let max_supply = match self.max_supply.clone() {
+            Some(max_supply) => max_supply,
+            None =>  return  Err("airdop_split: no max supply".to_string()),
         };
 
         let airdrop_amount = match self.airdrop_amount.clone() {
@@ -744,21 +744,16 @@ impl SCL01Contract {
         };
 
         let split_amount = airdrop_amount/ last_airdrop_split.len() as u64;
-        let new_owners:Vec<(String, u64)> = Vec::new(); 
+        let mut new_owners:Vec<(String, u64)> = Vec::new(); 
         for receiver in last_airdrop_split {
-            let mut new_owner: (String, u64) = (receiver.to_string(), split_amount);
-            match self.owners.get(&receiver) {
-                Some(&e) => {
-                    self.owners.insert(receiver.to_string(), &e + split_amount);
-                    new_owner.1 = e + split_amount;
-                } None => {
-                    self.owners.insert(receiver.to_string(), split_amount);
-                }
-            }
+            let new_owner: (String, u64) = (receiver.to_string(), split_amount);
+            self.owners.insert(receiver.to_string(), split_amount);
+            new_owners.push(new_owner);
         }
 
-        current_airdrops += 1;
-        self.current_airdrops = Some(current_airdrops);
+        self.current_airdrops = self.total_airdrops;
+        self.last_airdrop_split = None;
+        self.supply = max_supply;
         return Ok(new_owners);
     }
     
