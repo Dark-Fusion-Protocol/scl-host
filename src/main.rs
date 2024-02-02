@@ -848,75 +848,78 @@ async fn great_sort(){
         Err(_) => Vec::new(),
     };
 
-    pending_queue.sort_by(|(_, string_a), (_, string_b)| string_a.cmp(string_b));
-
-
     _ = perform_contracts_checks().await;
 
-    if pending_queue.len() == 0 {
-        return;
-    }
-
-    let mut claims: Vec<(PendingCommandStruct, String, bool, bool, u64)> = Vec::new();
-    for command in claim_queue{
-        let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
-        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
-            Ok(command_date) => command_date,
-            Err(_) => continue,
-        };
-
-        let duration = Local::now().naive_local() - command_date;
-        let two_mins = chrono::Duration::minutes(2);
-        if res.0 == false {
-            if duration > two_mins {
-                let path_from_string: &Path = Path::new(&command.1);
-                if path_from_string.is_file() {
-                     let _res = fs::remove_file(&path_from_string);
+    if claim_queue.len() > 0 {
+        let mut claims: Vec<(PendingCommandStruct, String, bool, bool, u64)> = Vec::new();
+        for command in claim_queue{
+            let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
+            let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+                Ok(command_date) => command_date,
+                Err(_) => continue,
+            };
+    
+            let duration = Local::now().naive_local() - command_date;
+            let two_mins = chrono::Duration::minutes(2);
+            if res.0 == false {
+                if duration > two_mins {
+                    let path_from_string: &Path = Path::new(&command.1);
+                    if path_from_string.is_file() {
+                         let _res = fs::remove_file(&path_from_string);
+                    }
                 }
-            }
-
-            continue;
-        }
-
-        claims.push((command.0, command.1, res.0 ,res.1, res.2));
-    }
-
-    claims.sort_by(|(_, _,_, _, amount_1), (_, _,_, _, amount_2)| amount_2.cmp(amount_1));
-
-    for command in claims{
-        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
-            Ok(command_date) => command_date,
-            Err(_) => continue,
-        };
-
-        let duration = Local::now().naive_local() - command_date;
-        let two_mins = chrono::Duration::minutes(2);
-        if command.2 == false {
-            if duration > two_mins {
-                let path_from_string: &Path = Path::new(&command.1);
-                if path_from_string.is_file() {
-                     let _res = fs::remove_file(&path_from_string);
-                }
-            }
-
-            continue;
-        }
-
-        if !command.3 {
-            let twenty_four_hours = chrono::Duration::hours(24);
-            if duration >= twenty_four_hours {
+    
                 continue;
             }
-            
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
-        }else{
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
-            let path_from_string: &Path = Path::new(&command.1);
-            if path_from_string.is_file() {
-                 let _res = fs::remove_file(&path_from_string);
+    
+            claims.push((command.0, command.1, res.0 ,res.1, res.2));
+        }
+    
+        claims.sort_by(|(_, _,_, _, amount_1), (_, _,_, _, amount_2)| amount_2.cmp(amount_1));
+    
+        for command in claims{
+            let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+                Ok(command_date) => command_date,
+                Err(_) => continue,
+            };
+    
+            let duration = Local::now().naive_local() - command_date;
+            let two_mins = chrono::Duration::minutes(2);
+            if command.2 == false {
+                if duration > two_mins {
+                    let path_from_string: &Path = Path::new(&command.1);
+                    if path_from_string.is_file() {
+                         let _res = fs::remove_file(&path_from_string);
+                    }
+                }
+    
+                continue;
+            }
+    
+            if !command.3 {
+                let twenty_four_hours = chrono::Duration::hours(24);
+                if duration >= twenty_four_hours {
+                    continue;
+                }
+                
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
+            }else{
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
+                let path_from_string: &Path = Path::new(&command.1);
+                if path_from_string.is_file() {
+                     let _res = fs::remove_file(&path_from_string);
+                }
             }
         }
     }
+
+
+
+    if pending_queue.len() == 0 {
+        return ;
+    }
+
+    pending_queue.sort_by(|(_, string_a), (_, string_b)| string_a.cmp(string_b));
 
     for command in pending_queue{
         let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
