@@ -840,7 +840,7 @@ async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<B
 async fn great_sort(){
     let mut pending_queue: Vec<(PendingCommandStruct, String)> = match read_queue(PENDINGCOMMANDSPATH.to_string()){
         Ok(pending_queue) => pending_queue,
-        Err(_) => return,
+        Err(_) => Vec::new(),
     };
 
     let claim_queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
@@ -912,8 +912,6 @@ async fn great_sort(){
             }
         }
     }
-
-
 
     if pending_queue.len() == 0 {
         return ;
