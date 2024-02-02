@@ -15,7 +15,7 @@ use crate::scl01::scl01_utils::{self, perform_minting_scl01, perform_transfer_sc
 use scl01::scl01_utils::{perform_create_diminishing_airdrop_scl01, perform_claim_diminishing_airdrop_scl01, perform_create_dge_scl01, perform_claim_dge_scl01, perform_minting_scl03, perform_rights_to_mint, perform_minting_scl02};
 
 mod utils;
-use utils::{read_server_config, save_command_backup, save_contract_interactions, save_server_config, dequeue_item, enqueue_item, read_from_file, write_to_file, read_queue, extract_commands, trim_chars, check_txid_confirmed, handle_get_request, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, read_contract_interactions};
+use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file};
 use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData};
 
 static ESPLORA_TX: &'static str = "https://btc.darkfusion.tech/tx/";
@@ -140,7 +140,7 @@ async fn main() {
             memes: Vec::new(),
             sorting: false,
             sort_again: false,
-            reserved_tickers: None    
+            reserved_tickers: None
         };
 
         let _ = save_server_config(c);
@@ -330,15 +330,9 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
 }
 
 // Warp post route functions
-async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Rejection> {  
+async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let res = payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await;
-    if res.0 == false {
-        return Err(reject::custom(CustomError {
-            message: "Unable to validate this transaction and payload".to_string(),
-        }));
-    }
-    
-    if res.1 == false {     
+    if !res.0 || !res.1 {     
         let current_date_time = Local::now();
         let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
         let pending_command = PendingCommandStruct{
@@ -355,11 +349,11 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
     
         let mut path = format!("{}{}-{}.txt", PENDINGCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), &req.txid);
         if req.payload.contains("CLAIM_DIMAIRDROP") {
-            path = format!("./Json/Queues/Claims/{}-{}.txt", res.2.to_string(), &req.txid);
+            path = format!("./Json/Queues/Claims/{}.txt", &req.txid);
         }
 
-        let _res = match enqueue_item(path, &command_str.to_string()) {
-            Ok(res) => res,
+        let _ = match enqueue_item(path, &command_str.to_string()) {
+            Ok(_) => {},
             Err(_) => return Err(reject::custom(CustomError { message: "Unable to add pending command to queue".to_string()})),
         };
 
@@ -370,15 +364,14 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
             Err(_) => return Err(reject::custom(CustomError{ message : "Unable to serialize command data".to_string()}))
         };
         
-        let _res = match enqueue_item(format!("{}{}-{}.txt", TXCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), req.txid.clone()), &command_str.to_string()) {
-            Ok(res) => res,
-            Err(_) => {
-                return Err(reject::custom(CustomError{ message : "Unable to queue data".to_string()}))
-            }
+        let _ = match enqueue_item(format!("{}{}-{}.txt", TXCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), req.txid.clone()), &command_str.to_string()) {
+            Ok(_) => {},
+            Err(_) => return Err(reject::custom(CustomError{ message : "Unable to queue data".to_string()}))
         };
+
+        save_command_backup(&req, false);
     }
 
-    save_command_backup(&req, false);
     let result = ResultStruct {
         result: format!("Successfully added payload to queue").to_string(),
     };
@@ -850,52 +843,66 @@ async fn great_sort(){
         Err(_) => return,
     };
 
-    let mut queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
+    let claim_queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
         Ok(queue) => queue,
         Err(_) => Vec::new(),
     };
 
     pending_queue.sort_by(|(_, string_a), (_, string_b)| string_a.cmp(string_b));
 
-    queue.extend(pending_queue);
-
 
     _ = perform_contracts_checks().await;
 
-    if queue.len() == 0 {
-        
+    if pending_queue.len() == 0 {
         return;
     }
 
-    for command in queue{
-        
-        let url = ESPLORA_TX.to_string() + &command.0.txid;
-        let response = match handle_get_request(url).await {
-            Some(response) => response,
-            None => continue,      
-        };
-    
-        let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
-            Ok(tx_info) => tx_info,
+    let mut claims: Vec<(PendingCommandStruct, String, bool, bool, u64)> = Vec::new();
+    for command in claim_queue{
+        let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
+        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+            Ok(command_date) => command_date,
             Err(_) => continue,
         };
 
-        let status = match tx_info.status {
-            Some(status) => status,
-            None => continue, 
+        let duration = Local::now().naive_local() - command_date;
+        let two_mins = chrono::Duration::minutes(2);
+        if res.0 == false {
+            if duration > two_mins {
+                let path_from_string: &Path = Path::new(&command.1);
+                if path_from_string.is_file() {
+                     let _res = fs::remove_file(&path_from_string);
+                }
+            }
+
+            continue;
+        }
+
+        claims.push((command.0, command.1, res.0 ,res.1, res.2));
+    }
+
+    claims.sort_by(|(_, _,_, _, amount_1), (_, _,_, _, amount_2)| amount_2.cmp(amount_1));
+
+    for command in claims{
+        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+            Ok(command_date) => command_date,
+            Err(_) => continue,
         };
 
-        let confirmed = match status.confirmed {
-            Some(confirmed) => confirmed,
-            None => continue,      
-        };
+        let duration = Local::now().naive_local() - command_date;
+        let two_mins = chrono::Duration::minutes(2);
+        if command.2 == false {
+            if duration > two_mins {
+                let path_from_string: &Path = Path::new(&command.1);
+                if path_from_string.is_file() {
+                     let _res = fs::remove_file(&path_from_string);
+                }
+            }
 
-        if !confirmed {
-            let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
-                Ok(command_date) => command_date,
-                Err(_) => continue,
-            };
-            let duration = Local::now().naive_local() - command_date;
+            continue;
+        }
+
+        if !command.3 {
             let twenty_four_hours = chrono::Duration::hours(24);
             if duration >= twenty_four_hours {
                 continue;
@@ -903,16 +910,42 @@ async fn great_sort(){
             
             perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
         }else{
-            let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
-                Ok(command_date) => command_date,
-                Err(_) => continue,
-            };
-            let duration = Local::now().naive_local() - command_date;
+            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
+            let path_from_string: &Path = Path::new(&command.1);
+            if path_from_string.is_file() {
+                 let _res = fs::remove_file(&path_from_string);
+            }
+        }
+    }
+
+    for command in pending_queue{
+        let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
+        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+            Ok(command_date) => command_date,
+            Err(_) => continue,
+        };
+
+        let duration = Local::now().naive_local() - command_date;
+        let two_mins = chrono::Duration::minutes(2);
+        if res.0 == false {
+            if duration > two_mins {
+                let path_from_string: &Path = Path::new(&command.1);
+                if path_from_string.is_file() {
+                     let _res = fs::remove_file(&path_from_string);
+                }
+            }
+
+            continue;
+        }
+
+        if !res.1 {
             let twenty_four_hours = chrono::Duration::hours(24);
             if duration >= twenty_four_hours {
                 continue;
             }
             
+            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
+        }else{
             perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
             let path_from_string: &Path = Path::new(&command.1);
             if path_from_string.is_file() {
@@ -1710,6 +1743,48 @@ fn get_scl01_contract_field(field: &String, contract:SCL01Contract, mut page: us
             };
 
             return Ok(format!("{{\"Airdrop_Amount\":\"{}\"}}", airdrop_amount.to_string()));
+        }
+        "dges" => {
+            let dges = match &contract.dges{
+                Some(dges) => dges,
+                None => return Ok("{}".to_string()), 
+            };
+
+            if dges.len() > 100 {
+                let filtered_dges: HashMap<_, _>  = dges.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_dges){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+               return Ok(format!("{}", result));
+           }else{
+            let result = match serde_json::to_string(&contract.dges){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+            return Ok(format!("{}", result));
+           }
+        }
+        "dim_airdrop" => {
+            let diminishing_airdrops = match &contract.diminishing_airdrops{
+                Some(diminishing_airdrops) => diminishing_airdrops,
+                None => return Ok("{}".to_string()), 
+            };
+
+            if diminishing_airdrops.len() > 100 {
+                let filtered_diminishing_airdrops: HashMap<_, _>  = diminishing_airdrops.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_diminishing_airdrops){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+               return Ok(format!("{}", result));
+           }else{
+            let result = match serde_json::to_string(&contract.diminishing_airdrops){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+            return Ok(format!("{}", result));
+           }
         }
         "current_amount_airdropped" => {
             let airdrop_amount = match contract.airdrop_amount {

@@ -573,7 +573,7 @@ impl SCL01Contract {
         return Ok(new_owners);
     }
 
-    pub fn cancel_listing(&mut self, txid: &String, listing_utxo: &String,  payload: String) -> Result<i32, String> {
+    pub fn cancel_listing(&mut self, txid: &String, listing_utxo: &String,  payload: String) -> Result<(String, u64), String> {
         let mut bids_available = match self.bids.clone() {
             Some(bids_available) => bids_available,
             None => HashMap::new(),
@@ -606,9 +606,11 @@ impl SCL01Contract {
         }
 
         let recievers_utxo: String = format!("{}:0",txid);
+        let mut new_owner = (recievers_utxo.to_string(), canceled_listing.list_amt);
         if self.owners.contains_key(&recievers_utxo) {
             let new_amount = self.owners[&recievers_utxo] + canceled_listing.list_amt;
             self.owners.insert(recievers_utxo.to_string(), new_amount);
+            new_owner.1 = new_amount;
         } else {
             self.owners.insert(recievers_utxo.to_string(), canceled_listing.list_amt);
         }
@@ -623,9 +625,8 @@ impl SCL01Contract {
 
         self.bids = Some(bids_available.clone());
         self.listings = Some(listings.clone());
-
         self.payloads.insert(txid.to_string(), payload);
-        return Ok(0);
+        return Ok(new_owner);
     }
 
     pub fn cancel_bid(&mut self, txid: &String, bidding_utxo: &String, payload: String) -> Result<i32, String> {

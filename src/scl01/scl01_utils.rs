@@ -3,7 +3,7 @@ use hex::decode;
 use bitcoin::{consensus::deserialize, Transaction};
 use regex::Regex;
 use std::fs;
-use crate::{utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_server_config, replace_payload_special_characters, save_contract_interactions, write_contract_directory, write_to_file, ContractImport, FulfilledSummary, TradeTx, TxInfo}, scl01::scl01_contract::{DimAirdrop, DGE}};
+use crate::{utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, replace_payload_special_characters, save_contract_interactions, write_contract_directory, write_to_file, ContractImport, FulfilledSummary, TradeTx, TxInfo}, scl01::scl01_contract::{DimAirdrop, DGE}};
 use bitcoin::Address;
 use super::scl01_contract::{SCL01Contract, Bid, Listing};
 
@@ -18,20 +18,6 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
         let txid_n = &captures.1;
         let max_supply = &captures.2;
         let decimals = &captures.3;
-
-        let config = match read_server_config(){
-            Ok(config) => config,
-            Err(_) => return,
-        };
-
-        let bans = match config.reserved_tickers{
-            Some(reserved_tickers) => reserved_tickers,
-            None => Vec::new(),
-        };
-
-        if bans.contains(&ticker.to_ascii_uppercase()) {
-            return;
-        }
 
         let mut owners_map: HashMap<String, u64> = HashMap::new();
         owners_map.insert(txid_n.clone().to_string(), max_supply.clone());
@@ -103,20 +89,6 @@ pub fn perform_minting_scl02(txid: &str, payload: &str) {
             Some(ticker) => ticker.as_str(),
             None => return,
         };
-
-        let config = match read_server_config(){
-            Ok(config) => config,
-            Err(_) => return,
-        };
-
-        let bans = match config.reserved_tickers{
-            Some(reserved_tickers) => reserved_tickers,
-            None => Vec::new(),
-        };
-
-        if bans.contains(&ticker.to_ascii_uppercase()) {           
-            return;
-        }
 
         let max_supply_str = match captures.get(2){
             Some(max_supply_str) => max_supply_str.as_str(),
@@ -205,20 +177,6 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
     };
     
     if let Ok(captures) = handle_mint_rtm_payload(payload, txid) {
-        let config = match read_server_config(){
-            Ok(config) => config,
-            Err(_) => return,
-        };
-
-        let bans = match config.reserved_tickers{
-            Some(reserved_tickers) => reserved_tickers,
-            None => Vec::new(),
-        };
-
-        if bans.contains(&captures.0.to_ascii_uppercase()) {            
-            return;
-        }
-
         let mut max_supply = 0;
         for (_, value) in captures.2.clone() {
             max_supply += value;
@@ -1462,14 +1420,19 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
         Err(_) => {},
     }
      
-    match contract.cancel_listing(&txid.to_string(), &listing_utxo.to_string(), payload.to_string()) {
-        Ok(_) => {},
+    let owner = match contract.cancel_listing(&txid.to_string(), &listing_utxo.to_string(), payload.to_string()) {
+        Ok(owner) => owner,
         Err(_) => return,
-    }
+    };
 
     let _ = save_contract_scl01(&contract, payload, &txid, pending);
     if !pending {
         let _ = save_contract_scl01(&contract, payload, &txid, false);
+        let data = format!("{}:O-,{}", &contract.contractid, owner.1);
+        write_to_file(format!("./Json/UTXOS/{}.txt", &owner.0),data.clone());
+    }else{
+        let data = format!("{}:P-O-,{}", &contract.contractid,owner.1);
+        write_to_file(format!("./Json/UTXOS/{}.txt", owner.0),data.clone());
     }
 }
 
