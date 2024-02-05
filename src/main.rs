@@ -1,5 +1,6 @@
 use chrono::{Local, NaiveDateTime};
 use crypto_hash::{hex_digest, Algorithm};
+use reqwest::{header, Client};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
@@ -15,7 +16,7 @@ use crate::scl01::scl01_utils::{self, perform_minting_scl01, perform_transfer_sc
 use scl01::scl01_utils::{perform_create_diminishing_airdrop_scl01, perform_claim_diminishing_airdrop_scl01, perform_create_dge_scl01, perform_claim_dge_scl01, perform_minting_scl03, perform_rights_to_mint, perform_minting_scl02};
 
 mod utils;
-use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file};
+use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, RelayedCommandStruct};
 use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData};
 
 static ESPLORA_TX: &'static str = "https://btc.darkfusion.tech/tx/";
@@ -41,6 +42,11 @@ async fn main() {
         .and(warp::path("commands"))
         .and(warp::body::json())
         .and_then(handle_command_request);
+
+    let perform_relay = warp::post()
+        .and(warp::path("relay_commands"))
+        .and(warp::body::json())
+        .and_then(handle_relayed_command_request);
 
     let consolidate = warp::post()
         .and(warp::path("consolidate"))
@@ -135,13 +141,7 @@ async fn main() {
     }
 
     if !fs::metadata(&"./Json/config.txt").is_ok() {
-        let c = Config{
-            block_height:0,
-            memes: Vec::new(),
-            sorting: false,
-            sort_again: false,
-            reserved_tickers: None
-        };
+        let c = Config{block_height:0,memes:Vec::new(),sorting:false,sort_again:false,reserved_tickers:None, hosts_ips: None, my_ip_split: Some(vec![127,0,0,1]), my_ip: None, key: None };
 
         let _ = save_server_config(c);
     }
@@ -163,6 +163,7 @@ async fn main() {
         .or(get_meme_contracts)
         .or(check_all_summaries)
         .or(consolidate)
+        .or(perform_relay)
         .recover(handle_custom_rejection)
         .with(warp::cors()
             .allow_methods(vec!["GET", "POST", "OPTIONS"]) // Only allow the methods your server supports
@@ -203,8 +204,22 @@ async fn main() {
         }
     });
 
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => return,
+    };
+
+    let ip_split = match config.my_ip_split{
+        Some(ip_split) => ip_split,
+        None => return,
+    };
+
+    if ip_split.len() < 4 {
+        return
+    }
+
     //Start the server on port 8080
-    warp::serve(routes).run(([127,0,0,1], 8080)).await;
+    warp::serve(routes).run(([ip_split[0], ip_split[1], ip_split[2], ip_split[3]], 8080)).await;
 }
 
 async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
@@ -376,6 +391,119 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
         result: format!("Successfully added payload to queue").to_string(),
     };
 
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => return Ok(warp::reply::json(&result)),
+    };
+
+    let host_ips: Vec<String> = match config.hosts_ips {
+        Some(host_ips) => host_ips,
+        None => return Ok(warp::reply::json(&result)),
+    };
+
+    let my_ip = match config.my_ip {
+        Some(my_ip) => my_ip,
+        None => return Ok(warp::reply::json(&result)),
+    };
+
+    let key = match config.key {
+        Some(key) => key,
+        None => return Ok(warp::reply::json(&result)),
+    };
+
+    let realy_command: RelayedCommandStruct = RelayedCommandStruct{
+        txid: req.txid,
+        payload: req.payload,
+        bid_payload: req.bid_payload,
+        key: key,
+    };
+
+    let relay_command_str = match serde_json::to_string(&realy_command) {
+        Ok(relay_command_str) => relay_command_str,
+        Err(_) => return Ok(warp::reply::json(&result))
+    };
+
+    for ip in host_ips {
+        if ip != my_ip {
+            let url: String = format!("{}/relay_command", ip);
+            println!("{}", url);
+            let client = Client::new();
+			match client
+				.post(url)
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(relay_command_str.clone())
+				.send()
+				.await{
+					Ok(_) => println!("Successfully relayed"),
+					Err(_) => println!("Failed to relay"),
+			}	
+		}
+    }
+
+    return Ok(warp::reply::json(&result));
+}
+
+async fn handle_relayed_command_request(req: RelayedCommandStruct) -> Result<impl Reply, Rejection> { 
+    println!("Relayed command Recieved");
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => return Err(reject::custom(CustomError{ message : "Unable to serialize config data".to_string()})),
+    };
+
+    if config.key != Some(req.key) {
+        return Err(reject::custom(CustomError{ message : "Invalid Key".to_string()}))
+    }
+
+    let command = CommandStruct{
+        txid: req.txid.clone(),
+        payload: req.payload.clone(),
+        bid_payload: req.bid_payload.clone(),
+    };
+    
+    let res = payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await;
+    if !res.0 || !res.1 {     
+        let current_date_time = Local::now();
+        let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
+        let pending_command = PendingCommandStruct{
+            txid: req.txid.clone(),
+            payload: req.payload.clone(),
+            time_added: formatted_date_time,
+            bid_payload: req.bid_payload.clone(),
+        };
+
+        let command_str = match serde_json::to_string(&pending_command) {
+            Ok(command_str) => command_str,
+            Err(_) => return Err(reject::custom(CustomError{ message : "Unable to serialize command data".to_string()}))
+        };
+    
+        let mut path = format!("{}{}-{}.txt", PENDINGCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), &req.txid);
+        if req.payload.contains("CLAIM_DIMAIRDROP") {
+            path = format!("./Json/Queues/Claims/{}.txt", &req.txid);
+        }
+
+        let _ = match enqueue_item(path, &command_str.to_string()) {
+            Ok(_) => {},
+            Err(_) => return Err(reject::custom(CustomError { message: "Unable to add pending command to queue".to_string()})),
+        };
+
+        save_command_backup(&command, true);
+    } else {       
+        let command_str = match serde_json::to_string(&command) {
+            Ok(command_str) => command_str,
+            Err(_) => return Err(reject::custom(CustomError{ message : "Unable to serialize command data".to_string()}))
+        };
+        
+        let _ = match enqueue_item(format!("{}{}-{}.txt", TXCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), req.txid.clone()), &command_str.to_string()) {
+            Ok(_) => {},
+            Err(_) => return Err(reject::custom(CustomError{ message : "Unable to queue data".to_string()}))
+        };
+
+        save_command_backup(&command, false);
+    }
+
+    let result = ResultStruct {
+        result: format!("Successfully added payload to queue").to_string(),
+    };
     return Ok(warp::reply::json(&result));
 }
 
@@ -1046,7 +1174,11 @@ async fn perform_contracts_checks() -> Result<String, String> {
             memes: config.memes,
             sorting: config.sorting,
             sort_again: config.sort_again,
-            reserved_tickers: config.reserved_tickers
+            reserved_tickers: config.reserved_tickers,
+            hosts_ips: config.hosts_ips,
+            my_ip_split: config.my_ip_split,
+            my_ip: config.my_ip,
+            key: config.key,
         };
 
         let _ = save_server_config(c);

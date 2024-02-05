@@ -17,6 +17,14 @@ pub struct CommandStruct {
     pub bid_payload : Option<Vec<BidPayload>>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct RelayedCommandStruct {
+    pub txid: String,
+    pub payload: String,
+    pub bid_payload : Option<Vec<BidPayload>>,
+    pub key: String
+}
+
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct PendingCommandStruct {
     pub txid: String,
@@ -179,7 +187,11 @@ pub struct Config {
     pub memes: Vec<String>,
     pub sorting: bool,
     pub sort_again: bool,
-    pub reserved_tickers: Option<Vec<String>>
+    pub reserved_tickers: Option<Vec<String>>,
+    pub hosts_ips: Option<Vec<String>>,
+    pub my_ip_split: Option<Vec<u8>>,
+    pub my_ip: Option<String>,
+    pub key: Option<String>
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
