@@ -191,7 +191,9 @@ pub struct Config {
     pub hosts_ips: Option<Vec<String>>,
     pub my_ip_split: Option<Vec<u8>>,
     pub my_ip: Option<String>,
-    pub key: Option<String>
+    pub key: Option<String>,
+    pub esplora: Option<String>,
+    pub url: Option<String>, 
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -245,6 +247,16 @@ pub struct CancelRequest{
     pub contract_id: String,
     pub txid: String,
     pub utxo: String,
+}
+
+#[derive(Debug, Deserialize, Default, Serialize, Clone)]
+pub struct BidData {
+    pub bid_price: String,
+    pub bid_amount: String,
+    pub order_id: String,
+    pub fulfill_tx: String,
+    pub accept_tx: String,
+    pub reseved_utxo:String,
 }
 
 #[derive(Debug, Deserialize, Serialize,)]
@@ -424,10 +436,12 @@ pub fn extract_contract_id(payload: &str)->Result<String, String>{
 
 pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str, explora_url:String) -> bool {
     let url = explora_url + "tx/" + &txid;
-
-    let response = match handle_get_request(url).await {
+    let response = match handle_get_request(url.clone()).await {
         Some(response) => response,
-        None => return false,
+        None => {
+            println!("No response from esplora: {}", url);
+            return false
+        },
     };
     
     let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
@@ -455,7 +469,18 @@ pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str, explora_url:Stri
     return true;
 }
 
-pub async fn check_txid_confirmed(txid: &str, esplora: &String) -> Result<bool, String> {
+pub async fn check_txid_confirmed(txid: &str) -> Result<bool, String> {
+
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
+    };
+
     let url = esplora.to_string() + "tx/" + &txid;
 
     let response = match handle_get_request(url).await {
@@ -480,7 +505,17 @@ pub async fn check_txid_confirmed(txid: &str, esplora: &String) -> Result<bool, 
     return Ok(confirmed);
 }
 
-pub async fn get_current_block_height(esplora: String) -> Result<i32, String>{
+pub async fn get_current_block_height() -> Result<i32, String>{
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
+    };
+
     let url = esplora + "blocks/tip/height";
     let response = match handle_get_request(url).await {
         Some(response) => response,

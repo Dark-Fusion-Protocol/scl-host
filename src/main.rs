@@ -11,16 +11,14 @@ extern crate regex;
 use std::env;
 
 mod scl01{pub(crate) mod scl01_contract;pub(crate) mod scl01_utils;}
-use scl01::scl01_contract::{SCL01Contract, self};
+use scl01::scl01_contract::{self, SCL01Contract};
 use crate::scl01::scl01_utils::{self, perform_minting_scl01, perform_transfer_scl01, perform_burn_scl01, perform_list_scl01, perform_bid_scl01, perform_accept_bid_scl01, perform_fulfil_bid_scl01,perform_drips_scl01, perform_airdrop, perform_airdrop_split, convert_old_contracts, save_contract_scl01, read_contract_scl01,handle_payload_extra_trade_info, perform_listing_cancel_scl01, perform_bid_cancel_scl01,perform_drip_start_scl01};
 use scl01::scl01_utils::{perform_create_diminishing_airdrop_scl01, perform_claim_diminishing_airdrop_scl01, perform_create_dge_scl01, perform_claim_dge_scl01, perform_minting_scl03, perform_rights_to_mint, perform_minting_scl02};
 
 mod utils;
-use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, RelayedCommandStruct};
+use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, BidData, RelayedCommandStruct};
 use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData};
 
-static ESPLORA_TX: &'static str = "https://btc.darkfusion.tech/tx/";
-static ESPLORA: &'static str = "https://btc.darkfusion.tech/";
 static TXCOMMANDSPATH: &'static str = "./Json/Queues/Confirmed/";
 static PENDINGCOMMANDSPATH: &'static str = "./Json/Queues/Pending/";
 static CONTRACTSPATH: &'static str = "./Json/Contracts/";
@@ -141,8 +139,7 @@ async fn main() {
     }
 
     if !fs::metadata(&"./Json/config.txt").is_ok() {
-        let c = Config{block_height:0,memes:Vec::new(),sorting:false,sort_again:false,reserved_tickers:None, hosts_ips: None, my_ip_split: Some(vec![127,0,0,1]), my_ip: None, key: None };
-
+        let c = Config{block_height:0,memes:Vec::new(),sorting:false,sort_again:false,reserved_tickers:None, hosts_ips: None, my_ip_split: Some(vec![127,0,0,1]), my_ip: None, key: None, esplora: Some("https://btc.darkfusion.tech/".to_owned()), url: Some("https://scl.darkfusion.tech/".to_string()) };
         let _ = save_server_config(c);
     }
 
@@ -187,7 +184,17 @@ async fn main() {
                 Err(_) => continue, 
             };
 
-            perform_commands(command.txid.as_str(), command.payload.as_str(), &command.bid_payload, false).await;
+            let config = match read_server_config(){
+                Ok(config) => config,
+                Err(_) => Config::default(),
+            };
+        
+            let esplora = match config.esplora{
+                Some(esplora) => esplora,
+                None => "https://btc.darkfusion.tech/".to_owned(),
+            };
+
+            perform_commands(command.txid.as_str(), command.payload.as_str(), &command.bid_payload, false, &esplora).await;
         }
     });
 
@@ -223,7 +230,17 @@ async fn main() {
 }
 
 async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
-    let url = ESPLORA_TX.to_string() + &req.txid;
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
+    };
+
+    let url = format!("{}/tx/{}",esplora, &req.txid);
     let response = match handle_get_request(url).await {
         Some(response) => response,
         None => return Err(reject::custom(CustomError{ message : "Unable to check esplora".to_string()}))
@@ -277,7 +294,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
         let utxo = format!("{}:{}", v.txid.clone(), v.vout.clone());
         senders.push(utxo);
     }
-      let block_height = match get_current_block_height(ESPLORA.to_string()).await {
+      let block_height = match get_current_block_height().await {
             Ok(block_height) => block_height,
             Err(_) => return Err(reject::custom(CustomError{ message : "Failed to get block height".to_string()})),
         };
@@ -508,7 +525,7 @@ async fn handle_relayed_command_request(req: RelayedCommandStruct) -> Result<imp
 }
 
 async fn handle_check_utxo_files(data: UtxoBalances) -> Result<impl Reply, Rejection> {
-    let current_block = match get_current_block_height(ESPLORA.to_string()).await{
+    let current_block = match get_current_block_height().await{
         Ok(current_block) => current_block as u64,
         Err(_) => 0
     };
@@ -875,11 +892,22 @@ async fn handle_get_utxo_data(contract_id: String, field: String, utxo:String) -
 }
 
 async fn handle_get_tx_history(contract_id: String) -> Result<impl Reply, Rejection>{
-    let history = match check_contract_history(&contract_id){
-        Ok(history) => history,
-        Err(_) => return Err(reject::custom(CustomError{ message : "Unable to find contract".to_string()})),
+    let mut entries: Vec<ContractHistoryEntry> = Vec::new();
+    let payloads: HashMap<String,String>;
+    let contract = match read_contract_scl01(&contract_id, false){
+        Ok(contract) => contract,
+        Err(_) => return Err(reject::custom(CustomError{ message : "Unable to read contract".to_string()})),
     };
-    return Ok(warp::reply::json(&history));
+
+    payloads = contract.payloads;
+    for payload in payloads.clone() {
+        match extract_info_from_payload(&payload.0, &payload.1, &contract_id, false) {
+            Ok(data) => entries.extend(data),
+            Err(_) => continue
+        };  
+    }
+
+    return Ok(warp::reply::json(&entries));
 }
 
 async fn handle_custom_rejection(err: Rejection) -> std::result::Result<impl Reply, Infallible> {
@@ -900,7 +928,7 @@ async fn handle_custom_rejection(err: Rejection) -> std::result::Result<impl Rep
 }
 
 //Server Queue Functions
-async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<BidPayload>>, pending: bool){    
+async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<BidPayload>>, pending: bool, esplora: &String){    
     let commands = match extract_commands(payload){
         Ok(commands) => commands,
         Err(_) => return,  
@@ -922,11 +950,11 @@ async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<B
             perform_minting_scl03(txid, &payload);
             return;
         }else if command.contains("TRANSFER"){
-            perform_transfer_scl01(txid, &command, &payload, pending, ESPLORA.to_string()).await;
+            perform_transfer_scl01(txid, &command, &payload, pending, esplora.to_string()).await;
         }else if command.contains("BURN"){
-            perform_burn_scl01(&txid, &command, &payload, pending, ESPLORA.to_string()).await;
+            perform_burn_scl01(&txid, &command, &payload, pending, esplora.to_string()).await;
         }else if command.contains(":LIST"){
-            perform_list_scl01(&txid, &command, &payload, pending, ESPLORA.to_string()).await;
+            perform_list_scl01(&txid, &command, &payload, pending, esplora.to_string()).await;
         }else if command.contains(":BID"){
             let payloads = match bid_payloads {
                 Some(payloads) => payloads,
@@ -935,32 +963,32 @@ async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<B
 
             for bid_payload in payloads{
                 if contract_id == bid_payload.contract_id {
-                    perform_bid_scl01(&txid, &command, &payload, &bid_payload.trade_txs, pending, ESPLORA.to_string()).await;
+                    perform_bid_scl01(&txid, &command, &payload, &bid_payload.trade_txs, pending).await;
                     break;
                 }
             }
         }else if command.contains("ACCEPT_BID"){
-            perform_accept_bid_scl01(&txid, &command, pending, ESPLORA.to_string()).await;
+            perform_accept_bid_scl01(&txid, &command, pending, esplora.to_string()).await;
         }else if command.contains("FULFIL_TRADE"){ 
             perform_fulfil_bid_scl01(&txid, &command, pending).await;
         }else if payload.contains("CANCELLISTING"){
-            perform_listing_cancel_scl01(txid, &payload, pending, ESPLORA.to_string()).await;
+            perform_listing_cancel_scl01(txid, &payload, pending, esplora.to_string()).await;
         }else if payload.contains("CANCELBID"){
-            perform_bid_cancel_scl01(txid, &payload, pending, ESPLORA.to_string()).await;
+            perform_bid_cancel_scl01(txid, &payload, pending, esplora.to_string()).await;
         }else if command.contains("DRIP"){
-            perform_drip_start_scl01(txid,&command, &payload, pending, ESPLORA.to_string()).await;
+            perform_drip_start_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
         }else if command.contains(":DIMAIRDROP"){
-            perform_create_diminishing_airdrop_scl01(txid,&command, &payload, pending, ESPLORA.to_string()).await;
+            perform_create_diminishing_airdrop_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
         }else if command.contains("CLAIM_DIMAIRDROP"){
-            perform_claim_diminishing_airdrop_scl01(txid,&command, &payload, pending, ESPLORA.to_string()).await;
+            perform_claim_diminishing_airdrop_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
         }else if command.contains(":DGE"){
-            perform_create_dge_scl01(txid,&command, &payload, pending, ESPLORA.to_string()).await;
+            perform_create_dge_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
         }else if command.contains("CLAIM_DGE"){
-            perform_claim_dge_scl01(txid, &command, &payload, pending, ESPLORA.to_string()).await;
+            perform_claim_dge_scl01(txid, &command, &payload, pending, esplora.to_string()).await;
         }else if command.contains("AIRDROP"){
             perform_airdrop(txid, &command, &payload, pending);
         }else if command.contains("RIGHTTOMINT"){
-            perform_rights_to_mint(txid,&command, &payload, pending, ESPLORA.to_string()).await;
+            perform_rights_to_mint(txid,&command, &payload, pending, esplora.to_string()).await;
         }
     }
 }
@@ -974,6 +1002,16 @@ async fn great_sort(){
     let claim_queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
         Ok(queue) => queue,
         Err(_) => Vec::new(),
+    };
+
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
     };
 
     _ = perform_contracts_checks().await;
@@ -1030,9 +1068,9 @@ async fn great_sort(){
                     continue;
                 }
                 
-                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true, &esplora).await;
             }else{
-                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false, &esplora).await;
                 let path_from_string: &Path = Path::new(&command.1);
                 if path_from_string.is_file() {
                      let _res = fs::remove_file(&path_from_string);
@@ -1073,9 +1111,9 @@ async fn great_sort(){
                 continue;
             }
             
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true).await;
+            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true, &esplora).await;
         }else{
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false).await;
+            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false, &esplora).await;
             let path_from_string: &Path = Path::new(&command.1);
             if path_from_string.is_file() {
                  let _res = fs::remove_file(&path_from_string);
@@ -1086,7 +1124,17 @@ async fn great_sort(){
 
 // Validation
 async fn payload_validation_and_confirmation(txid: &str, payload: &str) -> (bool, bool, u64) { 
-    let url = ESPLORA_TX.to_string() + &txid;
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
+    };
+
+    let url = format!("{}/tx/{}",esplora, txid);
     let response = match handle_get_request(url).await {
         Some(response) => response,
         None => return (false, false, 0),
@@ -1158,7 +1206,7 @@ async fn perform_contracts_checks() -> Result<String, String> {
         Err(_) => return Ok("Success".to_string()),
     };
 
-    let current_block = match get_current_block_height(ESPLORA.to_string()).await{
+    let current_block = match get_current_block_height().await{
         Ok(current_block) => current_block,
         Err(_) => return Err("Unable to get contract type".to_string())
     };
@@ -1179,6 +1227,8 @@ async fn perform_contracts_checks() -> Result<String, String> {
             my_ip_split: config.my_ip_split,
             my_ip: config.my_ip,
             key: config.key,
+            esplora: config.esplora,
+            url: config.url
         };
 
         let _ = save_server_config(c);
@@ -1210,9 +1260,24 @@ async fn perform_contracts_checks() -> Result<String, String> {
                     None => continue,
                 };
 
-		        _ = perform_drips_scl01(contract_id.clone(), current_block as u64, false);                
-                _ = check_listings_fulfillents(&contract_id).await;
-                _ = check_airdrop_splits(&contract_id);
+		        _ = perform_drips_scl01(contract_id.clone(), current_block as u64, false);
+                let contract = match read_contract_scl01(contract_id.as_str(), false) {
+                    Ok(contract) => contract,
+                    Err(_) => return Err("Failed to find contract".to_string())
+                };
+
+                if let Some(bids) = contract.bids.clone() {
+                    for (key, value) in bids  {
+                        match add_fulfillment_commands_to_queue(&value.accept_tx, &key, &contract_id).await{
+                            Ok(_) => {},
+                            Err(_) =>  continue, 
+                        };
+                    }
+                }
+
+                if let Some(_split) = contract.clone().last_airdrop_split {
+                    perform_airdrop_split(contract)
+                }
             }
         }
     }
@@ -1244,16 +1309,334 @@ fn get_contracts() -> Result<Vec<String>, String> {
     Ok(file_names)
 }
 
-fn get_contract_field(contract_id: &String, field: &String, pending: bool, page_numer: usize) -> Result<String,String>{
+fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut page: usize) -> Result<String,String>{
     let contract = match read_contract_scl01(contract_id, pending){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
 
-    match get_scl01_contract_field(&field, contract, page_numer) {
-        Ok(data) => return Ok(data),
-        Err(_) => return Err("Unable to get contract data".to_string()),
-    };
+    match field.as_str() {
+        "state" => {
+            let result = match serde_json::to_string(&contract){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to read contract".to_string()), 
+            };
+            return Ok(format!("{}", result));
+        }
+        
+        "ticker" => {
+            return Ok(format!("{{\"Ticker\":\"{}\"}}", contract.ticker.to_string()));
+        }
+        
+        "contractid" => {
+            return Ok(format!("{{\"ContractID\":\"{}\"}}", contract.contractid.to_string()));
+        }
+        
+        "supply" => {
+            return Ok(format!("{{\"Supply\":\"{}\"}}", contract.supply.to_string()));
+        }
+        
+        "owners" => {
+            let total_pages = contract.owners.len()/ 100;
+            if contract.owners.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = contract.owners.clone().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));       
+                 let owners: Vec<_> = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                 let result = match serde_json::to_string(&owners){
+                    Ok(result) =>  result,
+                    Err(_) => return Err("Unable to get contract owners".to_string()), 
+                };
+
+                
+                let data = contruct_pagination_metadata(result, page, total_pages, 100);
+                return Ok(format!("{}", data));
+            }else{
+                let owners_vec:Vec<_> = contract.owners.into_iter().collect();
+                let result = match serde_json::to_string(&owners_vec){
+                    Ok(result) =>  result,
+                    Err(_) => return Err("Unable to get contract owners".to_string()), 
+                };
+
+                let data = contruct_pagination_metadata(result, page, total_pages, 100);
+                return Ok(format!("{}", data));
+            }
+        }
+        
+        "payloads" => {
+            let total_pages = contract.payloads.len()/ 100;
+            if contract.payloads.len() > 100 {
+                let mut sorted_entries: Vec<_> = contract.payloads.clone().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));       
+                let payloads: Vec<_> = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&payloads){
+                   Ok(result) =>  result,
+                   Err(_) => return Err("Unable to get contract payloads".to_string()), 
+               };
+
+               if page > total_pages {
+                  page = total_pages;
+               }
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let payloads_vec:Vec<_> = contract.payloads.into_iter().collect();
+            let result = match serde_json::to_string(&payloads_vec){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to get contract payloads".to_string()), 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "decimals" => {
+            return Ok(format!("{{\"Decimals\":\"{}\"}}", contract.decimals.to_string()));
+        }
+        
+        "listings" => {
+            let listings = match &contract.listings{
+                Some(lisitngs) => lisitngs,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let total_pages = listings.len()/ 100;
+            if listings.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = listings.into_iter().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));       
+                let filtered_listings: Vec<_>  = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_listings){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let listings_vec:Vec<_> = listings.into_iter().collect();
+            let result = match serde_json::to_string(&listings_vec){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "bids" => {
+            let bids = match &contract.bids{
+                Some(bids) => bids,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let total_pages = bids.len()/ 100;
+            if bids.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = bids.to_owned().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let filtered_bids: Vec<_>  = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_bids){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let bids_vec:Vec<_> = bids.into_iter().collect();
+            let result = match serde_json::to_string(&bids_vec){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to get contract pending bids".to_string()) 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "fulfillments" => {
+            let fulfillments = match &contract.fulfillments{
+                Some(fulfillments) => fulfillments,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let total_pages = fulfillments.len()/ 100;
+            if fulfillments.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = fulfillments.to_owned().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let filtered_fulfillments: Vec<_>  = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_fulfillments){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let fulfillments_vec:Vec<_> = fulfillments.into_iter().collect();
+            let result = match serde_json::to_string(&fulfillments_vec){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to get contract pending fulfillments".to_string()) 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "airdrop_amount" => {
+            let airdrop_amount = match contract.airdrop_amount {
+                Some(airdrop_amount) => airdrop_amount,
+                None => 0,
+            };
+
+            return Ok(format!("{{\"Airdrop_Amount\":\"{}\"}}", airdrop_amount.to_string()));
+        }
+        
+        "dges" => {
+            let dges = match &contract.dges{
+                Some(dges) => dges,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let total_pages = dges.len()/ 100;
+            if dges.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = dges.to_owned().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let filtered_dges: Vec<_>  = dges.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_dges){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let dges_vec:Vec<_> = dges.into_iter().collect();
+            let result = match serde_json::to_string(&dges_vec){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "dim_airdrop" => {
+            let diminishing_airdrops = match &contract.diminishing_airdrops{
+                Some(diminishing_airdrops) => diminishing_airdrops,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let total_pages = diminishing_airdrops.len()/ 100;
+            if diminishing_airdrops.len() > 100 {
+                if page > total_pages {
+                    page = total_pages;
+                }
+
+                let mut sorted_entries: Vec<_> = diminishing_airdrops.to_owned().drain().collect();
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+                let filtered_diminishing_airdrops: Vec<_>  = sorted_entries.iter().skip(100 * (page - 1)).take(100).collect();
+                let result = match serde_json::to_string(&filtered_diminishing_airdrops){
+                   Ok(result) =>  result,
+                   Err(_) => return Ok("{}".to_string()), 
+               };
+
+               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               return Ok(format!("{}", data));
+           }else{
+            let diminishing_airdrops_vec:Vec<_> = diminishing_airdrops.into_iter().collect();
+            let result = match serde_json::to_string(&diminishing_airdrops_vec){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            return Ok(format!("{}", data));
+           }
+        }
+        
+        "current_amount_airdropped" => {
+            let airdrop_amount = match contract.airdrop_amount {
+                Some(airdrop_amount) => airdrop_amount,
+                None => 0,
+            };
+
+            let current_airdrops = match contract.current_airdrops {
+                Some(current_airdrops) => current_airdrops,
+                None => 0,
+            };
+
+            return Ok(format!("{{\"Current_Airdrop_Amount\":\"{}\"}}", (current_airdrops * airdrop_amount).to_string()));
+        }
+        
+        "import_contract" => {
+            let import = match get_contract_header(contract.contractid.clone().as_str()){
+                Ok(import) => import,
+                Err(_) => return Err("Unable to get contract header".to_string()),
+            };
+
+            let result = match serde_json::to_string(&import){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to get contract header".to_string()), 
+            };
+            return Ok(format!("{}", result));
+        }
+        
+        "summary" => {
+            let summary = match get_scl01_contract_summary(&contract){
+                Ok(summary) => summary,
+                Err(_) => return Err("Unable to get contract summary".to_string()),
+            };
+            return Ok(format!("{}", summary));
+        }
+        
+        "trades" => {
+            let interactions =  match read_contract_interactions(&contract.contractid) {
+                Ok(interactions) => interactions,
+                Err(_) => return Err("Unable to get contract fulfillments".to_string())
+            };
+            let result = match serde_json::to_string(&interactions.fulfillment_summaries){
+                Ok(result) =>  result,
+                Err(_) => return Err("Unable to get contract fulfillments".to_string()), 
+            };
+
+            return Ok(format!("{}", result));
+        }
+        
+        s if s.contains(":") => {
+            match contract.owners.get(s) {
+                 Some(result) => return Ok(result.to_string()),
+                 None => return Ok( "{\"Result\":\"UTXO specified is unbound.\"}".to_string())
+            };
+        }
+
+         _ => {
+            return Err("Unknown contract endpoint".to_string());
+        }
+    }
 }
 
 fn get_utxo_field(contract_id: &String, field: &String, utxo: String, pending: bool) -> Result<String,String>{
@@ -1262,10 +1645,206 @@ fn get_utxo_field(contract_id: &String, field: &String, utxo: String, pending: b
         Err(_) => return Err("Unable to get contract".to_string()),
     };
 
-    match get_scl01_utxo_data(&field, &utxo, &contract) {
-        Ok(data) => return Ok(data),
-        Err(_) => return Err("Unable to get contract data".to_string()),
-    };
+    match field.as_str() {
+        "bids_on_listing" => {
+            let bids = match &contract.bids{
+                Some(bids) => bids,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let listings = match &contract.listings{
+                Some(listings) => listings,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let filter_listing: Vec<(&String, &scl01_contract::Listing)> = listings
+            .into_iter()
+            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
+            .collect();
+
+            if filter_listing.len() != 1 {
+                return Ok("{}".to_string());
+            }
+             
+            let listing_bids: HashMap<&String, &scl01_contract::Bid> = bids
+            .into_iter()
+            .filter(|(_, bid)| bid.order_id == filter_listing[0].0.to_string())
+            .collect();
+
+            let result_string = match serde_json::to_string(&listing_bids){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{}", result_string));
+        }
+
+        "bids_summary_on_listing" => {
+            let listings = match &contract.listings{
+                Some(lisitngs) => lisitngs,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let filter_listing: HashMap<&String, &scl01_contract::Listing> = listings
+            .into_iter()
+            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
+            .collect();
+
+            if filter_listing.len() != 1 {
+                return Ok("{}".to_string());
+            }
+
+            let mut listing = scl01_contract::Listing::default();
+            let mut key = "".to_string();
+            if let Some((k, value)) = filter_listing.iter().next() {
+                listing = value.to_owned().clone();
+                key = k.to_string();
+            }
+
+            let mut result = "{\"listing\" :".to_string();
+            let listing_string = match serde_json::to_string(&listing){
+                Ok(listing_string) =>  listing_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            result.push_str(&listing_string);
+            result.push_str(",\"bids\" :");
+            let bids: HashMap<String, scl01_contract::Bid> = match contract.bids{
+                Some(bids) => bids,
+                None => {
+                    result.push_str("{}");
+                    result.push_str("}");
+                    return Ok(format!("{}", result));
+                }, 
+            };
+             
+            let listing_bids: HashMap<String, scl01_contract::Bid> = bids
+            .into_iter()
+            .filter(|(_, bid)| bid.order_id == key)
+            .collect();
+
+            let mut bid_data: HashMap<String, BidData> = HashMap::new();
+            for (key, bid) in listing_bids {
+                let data = BidData{ bid_price: bid.bid_price.to_string(), bid_amount: bid.bid_amount.to_string(), order_id: bid.order_id, fulfill_tx: bid.fulfill_tx, accept_tx: bid.accept_tx, reseved_utxo: bid.reseved_utxo };
+                bid_data.insert(key, data);
+            }
+
+            let result_string = match serde_json::to_string(&bid_data){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+            
+            result.push_str(&result_string);
+            result.push_str("}");
+            return Ok(format!("{}", result))
+        }
+
+        "listing_for_bid" => {
+            let bids = match &contract.bids{
+                Some(bids) => bids,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let listings = match &contract.listings{
+                Some(listings) => listings,
+                None => return Ok("{}".to_string()), 
+            };
+            
+            let listing_bids: Vec<(&String, &scl01_contract::Bid)> = bids
+            .into_iter()
+            .filter(|(_, bid)| bid.reseved_utxo == utxo.to_string())
+            .collect();
+
+            if listing_bids.len() != 1 {
+                return Ok("{}".to_string());
+            }
+
+            let listing = match listings.get(&listing_bids[0].1.order_id){
+                Some(listing) => listing,
+                None => return Ok("{}".to_string()),
+            };
+
+            let result_string = match serde_json::to_string(&listing){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{}", result_string));
+        }
+
+        "listing" => {
+            let listings = match &contract.listings{
+                Some(listings) => listings,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let filter_listing: Vec<(&String, &scl01_contract::Listing)> = listings
+            .into_iter()
+            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
+            .collect();
+
+            if filter_listing.len() != 1 {
+                return Ok("{}".to_string());
+            }
+
+            let result_string = match serde_json::to_string(&filter_listing[0]){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{}", result_string));
+        }
+
+        "bid" => {
+            let bids = match &contract.bids{
+                Some(bids) => bids,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let listing_bids: Vec<(&String, &scl01_contract::Bid)> = bids
+            .into_iter()
+            .filter(|(_, bid)| bid.reseved_utxo == utxo.to_string())
+            .collect();
+
+            if listing_bids.len() != 1 {
+                return Ok("{}".to_string());
+            }
+
+            let result_string = match serde_json::to_string(&listing_bids[0].1){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{}", result_string));
+        }
+
+        "fulfillment" => {
+            let fulfillments = match &contract.fulfillments{
+                Some(fulfillments) => fulfillments,
+                None => return Err( "Unable to get contract fulfillments".to_string()), 
+            };
+
+            let result = match fulfillments.get(&utxo) {
+                Some(result) => result,
+                None => return Ok("{\"Result\":\"UTXO specified is unbound.\"}".to_string())
+            };
+
+            let result_string = match serde_json::to_string(&result){
+                Ok(result_string) =>  result_string,
+                Err(_) => return Err("Unable to get contract fulfillment".to_string()), 
+            };
+
+            return Ok(format!("{}", result_string));
+        }
+
+        "owner" => {
+            let _result = match contract.owners.get(&utxo) {
+                  Some(result) => return Ok(format!("{}", result.to_string())),
+                  None => return Ok("{\"Result\":\"UTXO specified is unbound.\"}".to_string())
+             };
+         }
+         _ => { return Err("Unknown contract endpoint".to_string());}
+    }
 }
 
 fn get_listing_summaries(contract_id: &String, listing_utxos: Vec<String>, pending: bool)-> Result<Vec<ListingSummary>,String>{
@@ -1424,50 +2003,6 @@ fn get_trade_details_from_bid_utxo(contract_id: &String, bid_utxos: Vec<String>)
     }
 
     return Ok (summaries);
-}
-
-fn check_contract_history(contract_id: &String) -> Result<Vec<ContractHistoryEntry>,String>{
-    let mut entries: Vec<ContractHistoryEntry> = Vec::new();
-    let payloads: HashMap<String,String>;
-    let pending_payloads:  HashMap<String,String>;
-    let contract = match read_contract_scl01(contract_id, false){
-        Ok(contract) => contract,
-        Err(_) => return Err("Unable to read contract".to_string()),
-    };
-
-    let pending_contract = match read_contract_scl01(contract_id, true){
-        Ok(contract) => contract,
-        Err(_) => return Err("Unable to read contract".to_string()),
-    };
-
-    payloads = contract.payloads;
-    pending_payloads = pending_contract.payloads;
-
-    for payload in payloads.clone() {
-        match extract_info_from_payload(&payload.0, &payload.1, &contract_id, false) {
-            Ok(data) => entries.extend(data),
-            Err(_) => continue
-        };  
-    }
-
-    let dif  = pending_payloads.len() - payloads.len();
-    if dif == 0 {
-        return Ok(entries);
-    }
-
-    let dif_payloads: HashMap<_, _> = pending_payloads
-        .iter()
-        .filter(|(key, _)| !payloads.contains_key(*key))
-        .collect();
-
-    for (payload_txid, payload) in dif_payloads {
-        match extract_info_from_payload(payload_txid, payload, &contract_id, true) {
-            Ok(data) => entries.extend(data),
-            Err(_) => continue,
-        };
-    }
-
-    return Ok(entries);
 }
 
 fn check_txid_history(contract_id: &String, txids: &Vec<String>) -> Result<Vec<ContractHistoryEntry>,String>{
@@ -1646,51 +2181,20 @@ fn extract_info_from_payload(txid: &String, payload: &String, contract_id: &Stri
     return Ok(entries);
 }
 
-async fn check_listings_fulfillents(contract_id: &String) -> Result<String,String>{
-    let contract = match read_contract_scl01(contract_id.as_str(), false) {
-        Ok(contract) => contract,
-        Err(_) => return Err("Failed to find contract".to_string())
-    };
-
-    if let Some(bids) = contract.bids {
-        for (key, value) in bids  {
-            match add_fulfillment_commands_to_queue(&value.accept_tx, &key, contract_id).await{
-                Ok(_) => {},
-                Err(_) =>  continue, 
-            };
-        }
-    }
-
-    return Ok("Success".to_string());
-}
-
-fn check_airdrop_splits(contract_id: &String) -> Result<String,String>{
-    let contract = match read_contract_scl01(contract_id.as_str(), false) {
-        Ok(contract) => contract,
-        Err(_) => return Err("Failed to find contract".to_string())
-    };
-
-    if let Some(_split) = contract.clone().last_airdrop_split {
-        perform_airdrop_split(contract)
-    }
-
-    return Ok("Success".to_string());
-}
-
 async fn add_fulfillment_commands_to_queue(accept_tx: &String, fulfillment_txid: &String, contract_id: &String) -> Result<String,String>{
     let txid = match get_txid_from_hash(&accept_tx){
         Ok(txid) => txid,
         Err(_) => return Err("Get the bid accept txid from the bid accept tx".to_string()), 
     };
 
-    let accept_res = match check_txid_confirmed(&txid, &ESPLORA.to_string()).await{
+    let accept_res = match check_txid_confirmed(&txid).await{
         Ok(res) => res,
         Err(_) => return Err("Failed to check bid accept txid".to_string())
     };
     let accept_payload = format!("{{{}:ACCEPT_BID}}",contract_id);
     _ = add_command_to_queue(&txid, &accept_payload,!accept_res);
 
-    let fulfill_res = match check_txid_confirmed(&fulfillment_txid, &ESPLORA.to_string()).await{
+    let fulfill_res = match check_txid_confirmed(&fulfillment_txid).await{
         Ok(res) => res,
         Err(_) => return Err("Failed to check fulfilment txid".to_string()),
     };
@@ -1739,434 +2243,6 @@ fn add_command_to_queue(txid: &String, payload: &String, pending: bool) -> Resul
     }
 
     return  Ok("Successfully added payload to queue:".to_string());
-}
-
-fn get_scl01_contract_field(field: &String, contract:SCL01Contract, mut page: usize)-> Result<String,String>{
-    match field.as_str() {
-        "state" => {
-            let result = match serde_json::to_string(&contract){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to read contract".to_string()), 
-            };
-            return Ok(format!("{}", result));
-        }
-        "ticker" => {
-            return Ok(format!("{{\"Ticker\":\"{}\"}}", contract.ticker.to_string()));
-        }
-        "contractid" => {
-            return Ok(format!("{{\"ContractID\":\"{}\"}}", contract.contractid.to_string()));
-        }
-        "supply" => {
-            return Ok(format!("{{\"Supply\":\"{}\"}}", contract.supply.to_string()));
-        }
-        "owners" => {
-            if contract.owners.len() > 100 {
-                 let owners: HashMap<&String, &u64> = contract.owners.iter().skip(100 * (page - 1)).take(100).collect();
-                 let result = match serde_json::to_string(&owners){
-                    Ok(result) =>  result,
-                    Err(_) => return Err("Unable to get contract owners".to_string()), 
-                };
-                let total_pages = contract.owners.len()/ 100;
-                let data = contruct_pagination_metadata(result, page, total_pages, 100);
-                return Ok(format!("{}", data));
-            }else{
-                let result = match serde_json::to_string(&contract.owners){
-                    Ok(result) =>  result,
-                    Err(_) => return Err("Unable to get contract owners".to_string()), 
-                };
-                return Ok(format!("{}", result));
-            }
-        }
-        "payloads" => {
-            if contract.payloads.len() > 100 {
-                let payloads: Vec<_> = contract.payloads
-                    .iter()
-                    .skip(100 * (page - 1))
-                    .take(100)
-                    .collect();
-                let result = match serde_json::to_string(&payloads){
-                   Ok(result) =>  result,
-                   Err(_) => return Err("Unable to get contract payloads".to_string()), 
-               };
-               let total_pages = contract.payloads.len()/ 100;
-               if page > total_pages {
-                  page = total_pages;
-               }
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
-               return Ok(format!("{}", data));
-           }else{
-            let result = match serde_json::to_string(&contract.payloads){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to get contract payloads".to_string()), 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "decimals" => {
-            return Ok(format!("{{\"Decimals\":\"{}\"}}", contract.decimals.to_string()));
-        }
-        
-        "listings" => {
-            let listings = match &contract.listings{
-                Some(lisitngs) => lisitngs,
-                None => return Ok("{}".to_string()), 
-            };
-
-            if listings.len() > 100 {
-                let filtered_listings: HashMap<_, _>  = listings.iter().skip(100 * (page - 1)).take(100).collect();
-                let result = match serde_json::to_string(&filtered_listings){
-                   Ok(result) =>  result,
-                   Err(_) => return Ok("{}".to_string()), 
-               };
-               return Ok(format!("{}", result));
-           }else{
-            let result = match serde_json::to_string(&contract.listings){
-                Ok(result) =>  result,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "bids" => {
-            let bids = match &contract.bids{
-                Some(bids) => bids,
-                None => return Ok("{}".to_string()), 
-            };
-
-            if bids.len() > 100 {
-                let filtered_bids: HashMap<_, _>  = bids.iter().skip(100 * (page - 1)).take(100).collect();
-                let result = match serde_json::to_string(&filtered_bids){
-                   Ok(result) =>  result,
-                   Err(_) => return Ok("{}".to_string()), 
-               };
-               return Ok(format!("{}", result));
-           }else{
-            let result = match serde_json::to_string(&contract.bids){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to get contract pending bids".to_string()) 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "fulfillments" => {
-            let fulfillments = match &contract.fulfillments{
-                Some(fulfillments) => fulfillments,
-                None => return Ok("{}".to_string()), 
-            };
-
-            if fulfillments.len() > 100 {
-                let filtered_fulfillments: HashMap<_, _>  = fulfillments.iter().skip(100 * (page - 1)).take(100).collect();
-                let result = match serde_json::to_string(&filtered_fulfillments){
-                   Ok(result) =>  result,
-                   Err(_) => return Ok("{}".to_string()), 
-               };
-               return Ok(format!("{}", result));
-           }else{
-            let result = match serde_json::to_string(&contract.fulfillments){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to get contract pending fulfillments".to_string()) 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "airdrop_amount" => {
-            let airdrop_amount = match contract.airdrop_amount {
-                Some(airdrop_amount) => airdrop_amount,
-                None => 0,
-            };
-
-            return Ok(format!("{{\"Airdrop_Amount\":\"{}\"}}", airdrop_amount.to_string()));
-        }
-        "dges" => {
-            let dges = match &contract.dges{
-                Some(dges) => dges,
-                None => return Ok("{}".to_string()), 
-            };
-
-            if dges.len() > 100 {
-                let filtered_dges: HashMap<_, _>  = dges.iter().skip(100 * (page - 1)).take(100).collect();
-                let result = match serde_json::to_string(&filtered_dges){
-                   Ok(result) =>  result,
-                   Err(_) => return Ok("{}".to_string()), 
-               };
-               return Ok(format!("{}", result));
-           }else{
-            let result = match serde_json::to_string(&contract.dges){
-                Ok(result) =>  result,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "dim_airdrop" => {
-            let diminishing_airdrops = match &contract.diminishing_airdrops{
-                Some(diminishing_airdrops) => diminishing_airdrops,
-                None => return Ok("{}".to_string()), 
-            };
-
-            if diminishing_airdrops.len() > 100 {
-                let filtered_diminishing_airdrops: HashMap<_, _>  = diminishing_airdrops.iter().skip(100 * (page - 1)).take(100).collect();
-                let result = match serde_json::to_string(&filtered_diminishing_airdrops){
-                   Ok(result) =>  result,
-                   Err(_) => return Ok("{}".to_string()), 
-               };
-               return Ok(format!("{}", result));
-           }else{
-            let result = match serde_json::to_string(&contract.diminishing_airdrops){
-                Ok(result) =>  result,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-            return Ok(format!("{}", result));
-           }
-        }
-        "current_amount_airdropped" => {
-            let airdrop_amount = match contract.airdrop_amount {
-                Some(airdrop_amount) => airdrop_amount,
-                None => 0,
-            };
-
-            let current_airdrops = match contract.current_airdrops {
-                Some(current_airdrops) => current_airdrops,
-                None => 0,
-            };
-
-            return Ok(format!("{{\"Current_Airdrop_Amount\":\"{}\"}}", (current_airdrops * airdrop_amount).to_string()));
-        }
-        "import_contract" => {
-            let import = match get_contract_header(contract.contractid.clone().as_str()){
-                Ok(import) => import,
-                Err(_) => return Err("Unable to get contract header".to_string()),
-            };
-
-            let result = match serde_json::to_string(&import){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to get contract header".to_string()), 
-            };
-            return Ok(format!("{}", result));
-        }
-        "summary" => {
-            let summary = match get_scl01_contract_summary(&contract){
-                Ok(summary) => summary,
-                Err(_) => return Err("Unable to get contract summary".to_string()),
-            };
-            return Ok(format!("{}", summary));
-        }
-        "trades" => {
-            let interactions =  match read_contract_interactions(&contract.contractid) {
-                Ok(interactions) => interactions,
-                Err(_) => return Err("Unable to get contract fulfillments".to_string())
-            };
-            let result = match serde_json::to_string(&interactions.fulfillment_summaries){
-                Ok(result) =>  result,
-                Err(_) => return Err("Unable to get contract fulfillments".to_string()), 
-            };
-
-            return Ok(format!("{}", result));
-        }
-        s if s.contains(":") => {
-            match contract.owners.get(s) {
-                 Some(result) => return Ok(result.to_string()),
-                 None => return Ok( "{\"Result\":\"UTXO specified is unbound.\"}".to_string())
-            };
-        }
-
-         _ => {
-            return Err("Unknown contract endpoint".to_string());
-        }
-    }
-}
-
-fn get_scl01_utxo_data(field: &String, utxo: &String, contract: &SCL01Contract)-> Result<String,String>{
-    match field.as_str() {
-        "bids_on_listing" => {
-            let bids = match &contract.bids{
-                Some(bids) => bids,
-                None => return Ok("{}".to_string()), 
-            };
-
-            let listings = match &contract.listings{
-                Some(listings) => listings,
-                None => return Ok("{}".to_string()), 
-            };
-
-            let filter_listing: Vec<(&String, &scl01_contract::Listing)> = listings
-            .into_iter()
-            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
-            .collect();
-
-            if filter_listing.len() != 1 {
-                return Ok("{}".to_string());
-            }
-             
-            let listing_bids: HashMap<&String, &scl01_contract::Bid> = bids
-            .into_iter()
-            .filter(|(_, bid)| bid.order_id == filter_listing[0].0.to_string())
-            .collect();
-
-            let result_string = match serde_json::to_string(&listing_bids){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-            return Ok(format!("{}", result_string));
-        }
-
-        "bids_summary_on_listing" => {
-            let listings = match &contract.listings{
-                Some(lisitngs) => lisitngs,
-                None => return Ok("{}".to_string()), 
-            };
-
-            let filter_listing: HashMap<&String, &scl01_contract::Listing> = listings
-            .into_iter()
-            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
-            .collect();
-
-            if filter_listing.len() != 1 {
-                return Ok("{}".to_string());
-            }
-
-            let mut listing = scl01_contract::Listing::default();
-            let mut key = "".to_string();
-            if let Some((k, value)) = filter_listing.iter().next() {
-                listing = value.to_owned().clone();
-                key =k.to_string();
-            }
-
-            let mut result = "{\"listing\" :".to_string();
-
-            let listing_string = match serde_json::to_string(&listing){
-                Ok(listing_string) =>  listing_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-
-            result.push_str(&listing_string);
-
-            result.push_str(",\"bids\" :");
-
-            let bids = match &contract.bids{
-                Some(bids) => bids,
-                None => {
-                    result.push_str("{}");
-                    result.push_str("}");
-                    return Ok(format!("{}", result))
-                }, 
-            };
-             
-            let listing_bids: HashMap<&String, &scl01_contract::Bid> = bids
-            .into_iter()
-            .filter(|(_, bid)| bid.order_id == key)
-            .collect();
-
-            let result_string = match serde_json::to_string(&listing_bids){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-            result.push_str(&result_string);
-            result.push_str("}");
-            return Ok(format!("{}", result))
-        }
-
-        "listing_for_bid" => {
-            let bids = match &contract.bids{
-                Some(bids) => bids,
-                None => return Ok("{}".to_string()), 
-            };
-
-            let listings = match &contract.listings{
-                Some(listings) => listings,
-                None => return Ok("{}".to_string()), 
-            };
-            
-            let listing_bids: Vec<(&String, &scl01_contract::Bid)> = bids
-            .into_iter()
-            .filter(|(_, bid)| bid.reseved_utxo == utxo.to_string())
-            .collect();
-
-            if listing_bids.len() != 1 {
-                return Ok("{}".to_string())
-            }
-
-            let listing = match listings.get(&listing_bids[0].1.order_id){
-                Some(listing) => listing,
-                None => return Ok("{}".to_string()),
-            };
-
-            let result_string = match serde_json::to_string(&listing){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-
-            return Ok(format!("{}", result_string))
-        }
-
-        "listing" => {
-            let listings = match &contract.listings{
-                Some(listings) => listings,
-                None => return Ok("{}".to_string()), 
-            };
-            let filter_listing: Vec<(&String, &scl01_contract::Listing)> = listings
-            .into_iter()
-            .filter(|(_, listing)| listing.list_utxo == utxo.to_string())
-            .collect();
-
-            if filter_listing.len() != 1 {
-                return Ok("{}".to_string());
-            }
-            let result_string = match serde_json::to_string(&filter_listing[0]){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-
-            return Ok(format!("{}", result_string));
-        }
-
-        "bid" => {
-            let bids = match &contract.bids{
-                Some(bids) => bids,
-                None => return Ok("{}".to_string()), 
-            };
-            let listing_bids: Vec<(&String, &scl01_contract::Bid)> = bids
-            .into_iter()
-            .filter(|(_, bid)| bid.reseved_utxo == utxo.to_string())
-            .collect();
-
-            if listing_bids.len() != 1 {
-                return Ok("{}".to_string())
-            }
-
-            let result_string = match serde_json::to_string(&listing_bids[0].1){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Ok("{}".to_string()), 
-            };
-
-            return Ok(format!("{}", result_string));
-        }
-
-        "fulfillment" => {
-            let fulfillments = match &contract.fulfillments{
-                Some(fulfillments) => fulfillments,
-                None => return Err( "Unable to get contract fulfillments".to_string()), 
-            };
-            let result = match fulfillments.get(utxo) {
-                Some(result) => result,
-                None => return Ok("{\"Result\":\"UTXO specified is unbound.\"}".to_string())
-            };
-            let result_string = match serde_json::to_string(&result){
-                Ok(result_string) =>  result_string,
-                Err(_) => return Err("Unable to get contract fulfillment".to_string()), 
-            };
-
-            return Ok(format!("{}", result_string))
-        }
-
-        "owner" => {
-            let _result = match contract.owners.get(utxo) {
-                  Some(result) => return Ok(format!("{}", result.to_string())),
-                  None => return Ok("{\"Result\":\"UTXO specified is unbound.\"}".to_string())
-             };
-         }
-         _ => { return Err("Unknown contract endpoint".to_string());}
-    }
 }
 
 fn get_scl01_contract_summary(contract: &SCL01Contract) -> Result<String, String> {

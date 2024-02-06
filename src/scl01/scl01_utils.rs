@@ -3,7 +3,7 @@ use hex::decode;
 use bitcoin::{consensus::deserialize, Transaction};
 use regex::Regex;
 use std::fs;
-use crate::{utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, replace_payload_special_characters, save_contract_interactions, write_contract_directory, write_to_file, ContractImport, FulfilledSummary, TradeTx, TxInfo}, scl01::scl01_contract::{DimAirdrop, DGE}};
+use crate::{utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_server_config, replace_payload_special_characters, save_contract_interactions, write_contract_directory, write_to_file, Config, ContractImport, FulfilledSummary, TradeTx, TxInfo}, scl01::scl01_contract::{DimAirdrop, DGE}};
 use bitcoin::Address;
 use super::scl01_contract::{SCL01Contract, Bid, Listing};
 
@@ -55,10 +55,20 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
                     write_contract_directory( format!("./Json/Contracts/{}/state.txt", &new_contract.contractid), s.clone(),new_contract.contractid.as_str());
                     write_contract_directory(format!("./Json/Contracts/{}/pending.txt", &new_contract.contractid),  s.clone(), new_contract.contractid.as_str());
                     let path =  "./Json/Contracts/".to_string() +"/" + &new_contract.contractid + "/header.txt";
+                    let config = match read_server_config(){
+                        Ok(config) => config,
+                        Err(_) => Config::default(),
+                    };
+                
+                    let url = match config.url{
+                        Some(url) => url,
+                        None => "https://scl.darkfusion.tech/".to_owned(),
+                    };
+
                     let import = ContractImport{
                         contract_id: new_contract.contractid,
                         ticker: new_contract.ticker,
-                        rest_url: "https://scl.darkfusion.tech/".to_string(),
+                        rest_url: url.to_string(),
                         contract_type: "SCL01".to_string(),
                         decimals: new_contract.decimals
                     };
@@ -151,11 +161,21 @@ pub fn perform_minting_scl02(txid: &str, payload: &str) {
             Ok(s) => {
                     write_contract_directory( format!("./Json/Contracts/{}/state.txt", &new_contract.contractid), s.clone(),new_contract.contractid.as_str());
                     write_contract_directory(format!("./Json/Contracts/{}/pending.txt", &new_contract.contractid),  s.clone(), new_contract.contractid.as_str());
+                    let config = match read_server_config(){
+                        Ok(config) => config,
+                        Err(_) => Config::default(),
+                    };
+                
+                    let url = match config.url{
+                        Some(url) => url,
+                        None => "https://scl.darkfusion.tech/".to_owned(),
+                    };
+
                     let path =  "./Json/Contracts/".to_string() +"/" + &new_contract.contractid + "/header.txt";
                     let import = ContractImport{
                         contract_id: new_contract.contractid,
                         ticker: new_contract.ticker,
-                        rest_url: "https://scl.darkfusion.tech/".to_string(),
+                        rest_url: url,
                         contract_type: "SCL02".to_string(),
                         decimals: new_contract.decimals
                     };
@@ -210,11 +230,21 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
             Ok(s) => {
                     write_contract_directory( format!("./Json/Contracts/{}/state.txt", &new_contract.contractid), s.clone(),new_contract.contractid.as_str());
                     write_contract_directory(format!("./Json/Contracts/{}/pending.txt", &new_contract.contractid),  s.clone(), new_contract.contractid.as_str());
+                    let config = match read_server_config(){
+                        Ok(config) => config,
+                        Err(_) => Config::default(),
+                    };
+                
+                    let url = match config.url{
+                        Some(url) => url,
+                        None => "https://scl.darkfusion.tech/".to_owned(),
+                    };
+
                     let path =  "./Json/Contracts/".to_string() +"/" + &new_contract.contractid + "/header.txt";
                     let import = ContractImport{
                         contract_id: new_contract.contractid,
                         ticker: new_contract.ticker,
-                        rest_url: "https://scl.darkfusion.tech/".to_string(),
+                        rest_url: url,
                         contract_type: "SCL03".to_string(),
                         decimals: new_contract.decimals
                     };
@@ -370,7 +400,7 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
         return;
     }
 
-    let block_height = match get_current_block_height(esplora).await {
+    let block_height = match get_current_block_height().await {
         Ok(block_height) => block_height,
         Err(_) => return,
     };
@@ -500,7 +530,7 @@ pub async fn perform_list_scl01(txid: &str, command: &str, payload: &str, pendin
             return;
         }
 
-        let block_height = match get_current_block_height(esplora).await {
+        let block_height = match get_current_block_height().await {
             Ok(block_height) => block_height,
             Err(_) => return,
         };
@@ -592,7 +622,7 @@ fn update_list_utxos(listing: Listing, contract: SCL01Contract, pending: bool, o
     return Ok(0);
 }
 
-pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_txs: &Vec<TradeTx>, pending: bool, esplora: String) {    
+pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_txs: &Vec<TradeTx>, pending: bool) {    
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
@@ -717,7 +747,7 @@ pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_t
         bids.push(bid);
     }
 
-    let block_height = match get_current_block_height(esplora).await {
+    let block_height = match get_current_block_height().await {
         Ok(block_height) => block_height,
         Err(_) => 0
     };
@@ -940,7 +970,7 @@ pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, 
         return;
      }
 
-    let current_block_height = match get_current_block_height(esplora).await {
+    let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height,
         Err(_) => return,
     };
@@ -1015,7 +1045,7 @@ pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str,
         return;
     }
 
-    let current_block_height = match get_current_block_height(esplora).await {
+    let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height as u64,
         Err(_) => return,
     };
@@ -1192,7 +1222,7 @@ pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, 
         single_drop: results.7
     };
 
-    let current_block_height = match get_current_block_height(esplora).await {
+    let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height as u64,
         Err(_) => return,
     };
@@ -1319,7 +1349,7 @@ pub async fn perform_claim_dge_scl01(txid: &str, command: &str, payload: &str, p
         return;
     }
 
-    let current_block = match get_current_block_height(esplora.to_string()).await{
+    let current_block = match get_current_block_height().await{
         Ok(current_block) => current_block as u64,
         Err(_) => return,
     };
