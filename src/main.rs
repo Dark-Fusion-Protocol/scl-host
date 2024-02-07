@@ -240,7 +240,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
         None => "https://btc.darkfusion.tech/".to_owned(),
     };
 
-    let url = format!("{}/tx/{}",esplora, &req.txid);
+    let url = format!("{}tx/{}",esplora, &req.txid);
     let response = match handle_get_request(url).await {
         Some(response) => response,
         None => return Err(reject::custom(CustomError{ message : "Unable to check esplora".to_string()}))
@@ -1134,7 +1134,7 @@ async fn payload_validation_and_confirmation(txid: &str, payload: &str) -> (bool
         None => "https://btc.darkfusion.tech/".to_owned(),
     };
 
-    let url = format!("{}/tx/{}",esplora, txid);
+    let url = format!("{}tx/{}",esplora, txid);
     let response = match handle_get_request(url).await {
         Some(response) => response,
         None => return (false, false, 0),
@@ -1733,7 +1733,7 @@ fn get_utxo_field(contract_id: &String, field: &String, utxo: String, pending: b
                 Ok(result_string) =>  result_string,
                 Err(_) => return Ok("{}".to_string()), 
             };
-            
+
             result.push_str(&result_string);
             result.push_str("}");
             return Ok(format!("{}", result))
