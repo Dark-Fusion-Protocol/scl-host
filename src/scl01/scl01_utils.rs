@@ -854,7 +854,7 @@ pub async fn perform_accept_bid_scl01(txid: &str, payload: &str, pending: bool, 
 
     if pending {
         let fulfill_payload = format!("{{{}:FULFIL_TRADE}}",contract_id);
-        let new_owners = match contract.fulfil(&bid_id, &fulfill_payload.to_string(), &bid_id) {
+        let (new_owners, _, _) = match contract.fulfil(&bid_id, &fulfill_payload.to_string(), &bid_id) {
             Ok(n) => n,
             Err(_) => return,
         };
@@ -912,7 +912,7 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
         listing_price: listings[&order_id].price.clone(),
     };
 
-    let new_owners = match contract.fulfil(&txid.to_string(), &payload.to_string(), &txid.to_string()) {
+    let (new_owners, bids, listing) = match contract.fulfil(&txid.to_string(), &payload.to_string(), &txid.to_string()) {
         Ok(n) => n,
         Err(_) => return,
     };
@@ -926,6 +926,19 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
         }
 
         let _ = save_contract_scl01(&contract, payload, &txid, false);
+        for s in &bids{
+            let file_path = format!("./Json/UTXOS/{}.txt", s);
+            match fs::remove_file(file_path) {
+                Ok(_) => {},
+                Err(_) => {},
+            }
+        }
+
+        let listing_file_path = format!("./Json/UTXOS/{}.txt", listing);
+        match fs::remove_file(listing_file_path) {
+            Ok(_) => {},
+            Err(_) => {},
+        }
 
         let mut interactions =  match read_contract_interactions(&contract_id) {
             Ok(interactions) => interactions,
@@ -1450,7 +1463,7 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
         Err(_) => {},
     }
      
-    let owner = match contract.cancel_listing(&txid.to_string(), &listing_utxo.to_string(), payload.to_string()) {
+    let (owner,bids) = match contract.cancel_listing(&txid.to_string(), &listing_utxo.to_string(), payload.to_string()) {
         Ok(owner) => owner,
         Err(_) => return,
     };
@@ -1460,6 +1473,13 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
         let _ = save_contract_scl01(&contract, payload, &txid, false);
         let data = format!("{}:O-,{}", &contract.contractid, owner.1);
         write_to_file(format!("./Json/UTXOS/{}.txt", &owner.0),data.clone());
+        for s in &bids{
+            let file_path = format!("./Json/UTXOS/{}.txt", s);
+            match fs::remove_file(file_path) {
+                Ok(_) => {},
+                Err(_) => {},
+            }
+        }
     }else{
         let data = format!("{}:P-O-,{}", &contract.contractid,owner.1);
         write_to_file(format!("./Json/UTXOS/{}.txt", owner.0),data.clone());

@@ -512,7 +512,7 @@ impl SCL01Contract {
         return Ok(0);
     }
 
-    pub fn fulfil(&mut self, txid: &String, payload: &String, bid_id: &String) -> Result<HashMap<String, u64>, String> {
+    pub fn fulfil(&mut self, txid: &String, payload: &String, bid_id: &String) -> Result<(HashMap<String, u64>, Vec<String>, String), String> {
         let mut bids_available = match self.bids.clone() {
             Some(bids_available) => bids_available,
             None => return Err("accept_bid: no bids for contract".to_string()),
@@ -529,6 +529,8 @@ impl SCL01Contract {
         };
 
         let mut new_owners = HashMap::<String,u64>::new();
+        let mut listing_removed = String::new();
+        let mut bids_removed = Vec::<String>::new();
         if fulfillments.clone().contains_key(bid_id) {
             let order_id = fulfillments[bid_id].clone();
             let bid = bids_available[bid_id].clone();
@@ -554,7 +556,8 @@ impl SCL01Contract {
                     new_owners.insert(change.to_string(), change_amount);
                 }
             }
-
+         
+            listing_removed = listing[&order_id].list_utxo.clone();
             fulfillments.remove(bid_id);
             listing.remove(&order_id);
             let payload_data = format!("{}-ExtraInfo-{},{},{}",payload, bid_id, bids_available[bid_id].bid_amount, bids_available[bid_id].bid_price);
@@ -562,6 +565,7 @@ impl SCL01Contract {
             for (key, value) in bids_available.clone().iter_mut() {
                 if value.order_id == order_id.to_string() {
                     bids_available.remove(key);
+                    bids_removed.push(key.to_string());
                 }
             }
 
@@ -569,11 +573,12 @@ impl SCL01Contract {
             self.fulfillments = Some(fulfillments.clone());
             self.listings = Some(listing.clone());
             self.payloads.insert(txid.to_string(), payload_data);
-        } 
-        return Ok(new_owners);
+        }
+
+        return Ok((new_owners, bids_removed, listing_removed));
     }
 
-    pub fn cancel_listing(&mut self, txid: &String, listing_utxo: &String,  payload: String) -> Result<(String, u64), String> {
+    pub fn cancel_listing(&mut self, txid: &String, listing_utxo: &String,  payload: String) -> Result<((String, u64), Vec<String>), String> {
         let mut bids_available = match self.bids.clone() {
             Some(bids_available) => bids_available,
             None => HashMap::new(),
@@ -605,6 +610,7 @@ impl SCL01Contract {
             }
         }
 
+        let mut bids_removed = Vec::<String>::new();
         let recievers_utxo: String = format!("{}:0",txid);
         let mut new_owner = (recievers_utxo.to_string(), canceled_listing.list_amt);
         if self.owners.contains_key(&recievers_utxo) {
@@ -620,13 +626,14 @@ impl SCL01Contract {
         for (key, value) in bids_available.clone().iter_mut() {
             if value.order_id == order_id.to_string() {
                 bids_available.remove(key);
+                bids_removed.push(key.clone());
             }
         }
 
         self.bids = Some(bids_available.clone());
         self.listings = Some(listings.clone());
         self.payloads.insert(txid.to_string(), payload);
-        return Ok(new_owner);
+        return Ok((new_owner, bids_removed));
     }
 
     pub fn cancel_bid(&mut self, txid: &String, bidding_utxo: &String, payload: String) -> Result<i32, String> {
