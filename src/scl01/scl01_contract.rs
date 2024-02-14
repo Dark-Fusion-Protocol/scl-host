@@ -565,7 +565,7 @@ impl SCL01Contract {
             for (key, value) in bids_available.clone().iter_mut() {
                 if value.order_id == order_id.to_string() {
                     bids_available.remove(key);
-                    bids_removed.push(key.to_string());
+                    bids_removed.push(value.reseved_utxo.clone());
                 }
             }
 
@@ -626,7 +626,7 @@ impl SCL01Contract {
         for (key, value) in bids_available.clone().iter_mut() {
             if value.order_id == order_id.to_string() {
                 bids_available.remove(key);
-                bids_removed.push(key.clone());
+                bids_removed.push(value.reseved_utxo.clone());
             }
         }
 
