@@ -240,6 +240,7 @@ pub struct PagingMetaData {
     pub current_page: usize,
     pub total_pages: usize,
     pub page_entries: usize,
+    pub entries: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]

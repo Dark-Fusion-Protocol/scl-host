@@ -1337,7 +1337,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
         }
         
         "owners" => {
-            let total_pages = contract.owners.len()/ 100;
+            let total_pages = (contract.owners.len() as f64 / 100 as f64).ceil() as usize;
             if contract.owners.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1352,22 +1352,22 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 };
 
                 
-                let data = contruct_pagination_metadata(result, page, total_pages, 100);
+                let data = contruct_pagination_metadata(result, page, total_pages, 100, contract.owners.len());
                 return Ok(format!("{}", data));
             }else{
-                let owners_vec:Vec<_> = contract.owners.into_iter().collect();
+                let owners_vec:Vec<_> = contract.owners.clone().into_iter().collect();
                 let result = match serde_json::to_string(&owners_vec){
                     Ok(result) =>  result,
                     Err(_) => return Err("Unable to get contract owners".to_string()), 
                 };
 
-                let data = contruct_pagination_metadata(result, page, total_pages, 100);
+                let data = contruct_pagination_metadata(result, page, total_pages, 100, contract.owners.len());
                 return Ok(format!("{}", data));
             }
         }
         
         "payloads" => {
-            let total_pages = contract.payloads.len()/ 100;
+            let total_pages = (contract.payloads.len() as f64 / 100 as f64).ceil() as usize;
             if contract.payloads.len() > 100 {
                 let mut sorted_entries: Vec<_> = contract.payloads.clone().drain().collect();
                 sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));       
@@ -1381,16 +1381,16 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                   page = total_pages;
                }
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, contract.payloads.len());
                return Ok(format!("{}", data));
            }else{
-            let payloads_vec:Vec<_> = contract.payloads.into_iter().collect();
+            let payloads_vec:Vec<_> = contract.payloads.clone().into_iter().collect();
             let result = match serde_json::to_string(&payloads_vec){
                 Ok(result) =>  result,
                 Err(_) => return Err("Unable to get contract payloads".to_string()), 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, contract.payloads.len());
             return Ok(format!("{}", data));
            }
         }
@@ -1405,7 +1405,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 None => return Ok("{}".to_string()), 
             };
 
-            let total_pages = listings.len()/ 100;
+            let total_pages = (listings.len() as f64 / 100 as f64).ceil() as usize;
             if listings.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1419,7 +1419,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                    Err(_) => return Ok("{}".to_string()), 
                };
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, listings.len() );
                return Ok(format!("{}", data));
            }else{
             let listings_vec:Vec<_> = listings.into_iter().collect();
@@ -1428,7 +1428,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 Err(_) => return Ok("{}".to_string()), 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, listings.len() );
             return Ok(format!("{}", data));
            }
         }
@@ -1439,7 +1439,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 None => return Ok("{}".to_string()), 
             };
 
-            let total_pages = bids.len()/ 100;
+            let total_pages = (bids.len() as f64 / 100 as f64).ceil() as usize;
             if bids.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1453,7 +1453,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                    Err(_) => return Ok("{}".to_string()), 
                };
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, bids.len());
                return Ok(format!("{}", data));
            }else{
             let bids_vec:Vec<_> = bids.into_iter().collect();
@@ -1462,7 +1462,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 Err(_) => return Err("Unable to get contract pending bids".to_string()) 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, bids.len());
             return Ok(format!("{}", data));
            }
         }
@@ -1473,7 +1473,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 None => return Ok("{}".to_string()), 
             };
 
-            let total_pages = fulfillments.len()/ 100;
+            let total_pages = (fulfillments.len() as f64 / 100 as f64).ceil() as usize;
             if fulfillments.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1487,7 +1487,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                    Err(_) => return Ok("{}".to_string()), 
                };
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, fulfillments.len());
                return Ok(format!("{}", data));
            }else{
             let fulfillments_vec:Vec<_> = fulfillments.into_iter().collect();
@@ -1496,7 +1496,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 Err(_) => return Err("Unable to get contract pending fulfillments".to_string()) 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, fulfillments.len());
             return Ok(format!("{}", data));
            }
         }
@@ -1516,7 +1516,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 None => return Ok("{}".to_string()), 
             };
 
-            let total_pages = dges.len()/ 100;
+            let total_pages = (dges.len() as f64 / 100 as f64).ceil() as usize;
             if dges.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1530,7 +1530,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                    Err(_) => return Ok("{}".to_string()), 
                };
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, dges.len());
                return Ok(format!("{}", data));
            }else{
             let dges_vec:Vec<_> = dges.into_iter().collect();
@@ -1539,7 +1539,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 Err(_) => return Ok("{}".to_string()), 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, dges.len());
             return Ok(format!("{}", data));
            }
         }
@@ -1550,7 +1550,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 None => return Ok("{}".to_string()), 
             };
 
-            let total_pages = diminishing_airdrops.len()/ 100;
+            let total_pages = (diminishing_airdrops.len() as f64 / 100 as f64).ceil() as usize;
             if diminishing_airdrops.len() > 100 {
                 if page > total_pages {
                     page = total_pages;
@@ -1564,7 +1564,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                    Err(_) => return Ok("{}".to_string()), 
                };
 
-               let data = contruct_pagination_metadata(result, page, total_pages, 100);
+               let data = contruct_pagination_metadata(result, page, total_pages, 100, diminishing_airdrops.len());
                return Ok(format!("{}", data));
            }else{
             let diminishing_airdrops_vec:Vec<_> = diminishing_airdrops.into_iter().collect();
@@ -1573,7 +1573,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
                 Err(_) => return Ok("{}".to_string()), 
             };
 
-            let data = contruct_pagination_metadata(result, page, total_pages, 100);
+            let data = contruct_pagination_metadata(result, page, total_pages, 100, diminishing_airdrops.len());
             return Ok(format!("{}", data));
            }
         }
@@ -2347,8 +2347,8 @@ fn get_scl01_contract_summary(contract: &SCL01Contract) -> Result<String, String
     }
 }
 
-fn contruct_pagination_metadata(data: String, current_page: usize, total_pages: usize, page_entries: usize) -> String{
-    let meta = PagingMetaData{ current_page, total_pages, page_entries };
+fn contruct_pagination_metadata(data: String, current_page: usize, total_pages: usize, page_entries: usize, entries: usize) -> String{
+    let meta = PagingMetaData{ current_page, total_pages, page_entries, entries };
     let mut result: String = "{\"data\":".to_string();
     result.push_str(&data);
     result.push_str(",");
