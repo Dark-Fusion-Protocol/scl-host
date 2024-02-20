@@ -470,6 +470,24 @@ pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str, explora_url:Stri
     return true;
 }
 
+pub async fn check_utxo_spent(utxo: &str, esplora: &String) -> Result<bool, String> {
+    let split:  Vec<&str> =  utxo.split(":").collect();
+    if split.len() < 2 {
+        return Err("Unable to get tx status from esplora repsonse".to_string())
+    }
+    let url = esplora.to_string() + "tx/" + split[0] + "/outspend/" + split[1];
+
+    let response = match handle_get_request(url).await {
+        Some(response) => response,
+        None => return Err("No response from espolra".to_string())
+    };
+    
+    match serde_json::from_str::<SpentResult>(&response) {
+        Ok(result) => return Ok(result.spent),
+        Err(err) => return Err(err.to_string())
+    };
+}
+
 pub async fn check_txid_confirmed(txid: &str) -> Result<bool, String> {
 
     let config = match read_server_config(){

@@ -938,7 +938,7 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
         match fs::remove_file(listing_file_path) {
             Ok(_) => {},
             Err(_) => {},
-        }
+        };
 
         let mut interactions =  match read_contract_interactions(&contract_id) {
             Ok(interactions) => interactions,

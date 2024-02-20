@@ -16,7 +16,7 @@ use crate::scl01::scl01_utils::{self, perform_minting_scl01, perform_transfer_sc
 use scl01::scl01_utils::{perform_create_diminishing_airdrop_scl01, perform_claim_diminishing_airdrop_scl01, perform_create_dge_scl01, perform_claim_dge_scl01, perform_minting_scl03, perform_rights_to_mint, perform_minting_scl02};
 
 mod utils;
-use utils::{check_txid_confirmed, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, BidData, RelayedCommandStruct};
+use utils::{check_txid_confirmed, check_utxo_spent, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, BidData, RelayedCommandStruct};
 use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData};
 
 static TXCOMMANDSPATH: &'static str = "./Json/Queues/Confirmed/";
@@ -33,6 +33,9 @@ async fn main() {
 
         if user_input == "convert" {
             convert_old_contracts();
+        }
+        else if user_input == "check_spent" {
+            remove_spent_utxos().await;
         }
     }
     
@@ -223,7 +226,7 @@ async fn main() {
 
     if ip_split.len() < 4 {
         return
-    }
+    }     
 
     //Start the server on port 8080
     warp::serve(routes).run(([ip_split[0], ip_split[1], ip_split[2], ip_split[3]], 8080)).await;
@@ -2361,4 +2364,156 @@ fn contruct_pagination_metadata(data: String, current_page: usize, total_pages: 
     result.push_str(&meta_str);
     result.push_str("}");
     return result;
+}
+
+async fn remove_spent_utxos(){
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => return,
+    };
+    
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => return,
+    };
+
+    let entries = match fs::read_dir(CONTRACTSPATH.to_string()){
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let path = format!("{}/state.txt", entry.path().to_string_lossy());
+            if !fs::metadata(&path).is_ok()  {
+                continue;
+            }
+
+            let directory_name = entry
+            .path()
+            .file_name()
+            .and_then(|os_str| os_str.to_str())
+            .map(|s| s.to_string());
+
+            let contract_id = match directory_name {
+                Some(contract_id) => contract_id,
+                None => continue,
+            };
+
+            let mut contract = match read_contract_scl01(&contract_id, false){
+                Ok(contract) => contract,
+                Err(_) => continue,
+            };
+
+            let mut fulfillments = match contract.fulfillments{
+                Some(fulfillments) => fulfillments,
+                None => HashMap::new(),
+            };
+
+            let mut bids = match contract.bids{
+                Some(bids) => bids,
+                None => HashMap::new(),
+            };
+
+            let mut listings = match contract.listings{
+                Some(listings) => listings,
+                None => continue,
+            };
+
+            for (key, listing) in listings.clone()  {
+                let spent  = match check_utxo_spent(&listing.list_utxo, &esplora).await{
+                    Ok(spent) => spent,
+                    Err(_) => continue
+                };
+               
+               if spent {
+                    if let Some((bid_key, _)) = fulfillments.iter().find(|&(_, v)| *v == key) {
+                        let bid = match bids.get(bid_key) {
+                            Some(bid) => bid,
+                            None => todo!(),
+                        };
+
+                        let bid_spent  = match check_utxo_spent(&bid.reseved_utxo, &esplora).await{
+                            Ok(spent) => spent,
+                            Err(_) => continue
+                        };
+
+                        
+                        if bid_spent {
+                            println!("Spent Listing Removed {} for {}", listing.list_utxo, contract_id);
+                            listings.remove(&key);
+                            let file_path = format!("./Json/UTXOS/{}.txt", listing.list_utxo);
+                            match fs::remove_file(file_path) {
+                                Ok(_) => {},
+                                Err(_) => {},
+                            }
+
+                            for (bid_key, bid) in bids.clone()  {   
+                                if bid.order_id == key {
+                                    println!("Bid Removed from spent listing {} for {}", bid.reseved_utxo, contract_id);
+                                    bids.remove(&bid_key);
+                                    let file_path = format!("./Json/UTXOS/{}.txt", bid.reseved_utxo);
+                                    match fs::remove_file(file_path) {
+                                        Ok(_) => {},
+                                        Err(_) => {},
+                                    }
+
+                                    if fulfillments.contains_key(&bid_key) {
+                                        fulfillments.remove(&bid_key);
+                                    }
+                                }
+                            }
+                        }
+                    }else{
+                        println!("Spent Listing Removed {} for {}", listing.list_utxo, contract_id);
+                        listings.remove(&key);
+                        let file_path = format!("./Json/UTXOS/{}.txt", listing.list_utxo);
+                        match fs::remove_file(file_path) {
+                            Ok(_) => {},
+                            Err(_) => {},
+                        }
+
+                        for (bid_key, bid) in bids.clone()  {   
+                            if bid.order_id == key {
+                                println!("Bid Removed from spent Listing {}", bid_key);
+                                bids.remove(&bid_key);
+                                let file_path = format!("./Json/UTXOS/{}.txt", bid.reseved_utxo);
+                                match fs::remove_file(file_path) {
+                                    Ok(_) => {},
+                                    Err(_) => {},
+                                }
+
+                                if fulfillments.contains_key(&bid_key) {
+                                    fulfillments.remove(&bid_key);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (key, bid) in bids.clone()  {
+                let spent  = match check_utxo_spent(&bid.reseved_utxo, &esplora).await{
+                    Ok(spent) => spent,
+                    Err(_) => continue
+                };
+               
+                if spent {
+                    println!("Spent Bid Removed {}", bid.reseved_utxo);
+                    bids.remove(&key);
+                    let file_path = format!("./Json/UTXOS/{}.txt", bid.reseved_utxo);
+                    match fs::remove_file(file_path) {
+                        Ok(_) => {},
+                        Err(_) => {},
+                    }
+                }
+            }
+
+            contract.listings = Some(listings);
+            contract.bids = Some(bids);
+            contract.fulfillments = Some(fulfillments);
+            let _ = save_contract_scl01(&contract, "", "", false);
+
+        }
+    }
 }
