@@ -179,22 +179,7 @@ impl SCL01Contract {
                         drips.remove(&sender_utxo);
                     }
                 }
-            }
-
-            let last_index = receivers.len() - 1;
-            let mut drip_ret = 0;
-            if !new_drips.is_empty() {
-                let last_receiver = &receivers[last_index].0.clone();       
-                drips.insert(last_receiver.clone(), new_drips);
-                let blocks_dripped = owners_amount - total_value;
-            
-                if let Some(owned) = self.owners.get_mut(last_receiver) {
-                    *owned += blocks_dripped;
-                    drip_ret = *owned;
-                }
-            }
-            
-            
+            }         
 
             let mut recievers_drips_present: Vec<bool> = Vec::new(); 
             for entry in receivers.clone() {
@@ -207,6 +192,20 @@ impl SCL01Contract {
                     recievers_drips_present.push(true);
                 }else{
                     recievers_drips_present.push(false);
+                }
+            }
+
+            let last_index = receivers.len() - 1;
+            let mut drip_ret = 0;   
+            if !new_drips.is_empty() {
+                let last_receiver = &receivers[last_index].0.clone();       
+                drips.insert(last_receiver.clone(), new_drips);
+                let amount_dripped_in_block = owners_amount - total_value;
+
+                if self.owners.contains_key(last_receiver){
+                    let owned_amount = self.owners[last_receiver];
+                    self.owners.insert(last_receiver.clone(), amount_dripped_in_block + owned_amount);
+                    drip_ret = amount_dripped_in_block + owned_amount;
                 }
             }
 

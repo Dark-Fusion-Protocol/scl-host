@@ -2,3 +2,4 @@
 Json/
 .idea/
 Cargo.lock
+.DS_Store

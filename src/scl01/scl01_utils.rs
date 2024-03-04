@@ -455,9 +455,9 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
            for (index, (key,value)) in results.1.iter().enumerate() {
             let mut data= format!("{}:P-O-,{}", &contract.contractid,value);
             if drip.0[index] && index == results.1.len() - 1 {
-                data = format!("{}:DO-,{}", &contract.contractid, drip.1); 
+                data = format!("{}:P-DO-,{}", &contract.contractid, drip.1); 
             }else if drip.0[index]  {
-                data = format!("{}:DO-,{}", &contract.contractid, value); 
+                data = format!("{}:P-DO-,{}", &contract.contractid, value); 
             }
 
              match fs::write(format!("./Json/UTXOS/{}.txt", &key),data.clone(),){
