@@ -16,7 +16,7 @@ Or on Mac OS X using this curl command:
 
 Building the Console Application
 =====================================================================================================================================================================
-To build or run a new exectuable Rust must be installed.
+To build or run a new executable Rust must be installed.
 - ## Build an executable
     - In the project directory run the following commands to build to the target directory from which you can run the executable file.
   
@@ -34,16 +34,16 @@ Server Requests
 =====================================================================================================================================================================
 
 ## Get Requests
-- ## General requests
+- ## General Requests
   - Health check: {URl}:{Port}/health
     - Responds with a 200 to show the server is healthy 
   - List of all contract on the server: {URl}:{Port}/contracts
-    - Returns a list of contract ids as strings which are currentlly hosted on the server  
+    - Returns a list of contract ids as strings which are currently hosted on the server  
   
 - ## Contracts Requests
-- Contract requests have the general format **{URl}:{PORT}/{CONTRACT ID}/{FIELD}**. Where the **URL** is the IP/URL the server is being hosted on, the **PORT** is the port number the server is using to recieve requests, the **CONTRACT ID** is specific contract you wish to interact with and the **FIELD** is the data you wish to get from the contract.
+- Contract requests have the general format **{URl}:{PORT}/{CONTRACT ID}/{FIELD}**. Where the **URL** is the IP/URL the server is being hosted on, the **PORT** is the port number the server is using to receive requests, the **CONTRACT ID** is specific contract you wish to interact with and the **FIELD** is the data you wish to get from the contract.
   - Entire contract state : {URl}:{Port}/{Contract ID}/state
-    - An SCL contract object will be returned depedning on the contract type
+    - An SCL contract object will be returned depending on the contract type
     -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/state
   - Import Contract header : {URl}:{Port}/{Contract ID}/import_contract
     - Returns a import contract object
@@ -83,23 +83,47 @@ Server Requests
   - Contract Trades: {URl}:{Port}/{Contract ID}/trades
     -  Returns a list of contract trades fulfilled
     -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/trades
+
+  - Liquidated tokens: {URl}:{Port}/{Contract ID}/liquidated_tokens
+    -  Returns the amount of tokens liquidated from this contract in to a liquidity pool.
+    -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/liquidated_tokens
+
+  - Liquidity pool: {URl}:{Port}/{Contract ID}/liquidity_pool
+    -  Returns a liquidity pool struct if this contract is an SCL04 contract.
+    -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/liquidity_pool
+
+  - Contract Trades: {URl}:{Port}/{Contract ID}/trades
+    -  Returns a list of contract trades fulfilled
+    -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/trades
+
+  - Donation Generation Events: {URl}:{Port}/{Contract ID}/dges
+    -  Returns a hashmap of donation generation events for this contract
+    -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/dges
+
+  - Diminishing Airdrop: {URl}:{Port}/{Contract ID}/dim_airdrop
+    -   Returns a hashmap of diminishing airdrop for this contract
+    -  https://testscl.darkfusion.tech/0be85cccfa15c58fc8544a862ba33bd6477cc91820d1735b1d9daf404a0cf7fc/dim_airdrop
   
 - Pending Contracts
     - Requests for pending commands can be done by preceding fields in the above contract requests with "pending-"
       - Example: Entire pending contract state : {URl}:{Port}/{Contract ID}/pending-state
   
-- ## General Requests
+- ## General Get Requests
 -   - Contracts: {URl}:{Port}/contracts
     -  Returns a list of contract IDs hosted on the contract
     -  https://testscl.darkfusion.tech/contracts
   
   - Coin Drops: {URl}:{Port}/coin_drops
-    -  Returns a list of contract summaris of the coin drop contracts
+    -  Returns a list of contract summaries of the coin drop contracts
     -  https://testscl.darkfusion.tech/coin_drops
+
+  - Liquidity Pools: {URl}:{Port}/liquidity_pools
+    -  Returns a list of contract summaries for liquidity pool contracts minted
+    -  https://testscl.darkfusion.tech/liquidity_pools
   
 - ## UTXO Requests
-- UTXO requests have the general format **{URl}:{PORT}/{CONTRACT ID}/{FIELD}/{UTXO}**. Where the **URL** is the IP/URL trhe server is being hosted on, the **PORT** is the port number the server is using to recieve requests, the **CONTRACT ID** is specific contract you wish to interact with and the **FIELD** is the data type you wish to get from the contract and the **UTXO** is the bound utxo which you want to retieved the data associated with.
-  - SCL amount bound to utxo: {URl}:{Port}/{Contract ID}/owner/{utxo}
+- UTXO requests have the general format **{URl}:{PORT}/{CONTRACT ID}/{FIELD}/{UTXO}**. Where the **URL** is the IP/URL the server is being hosted on, the **PORT** is the port number the server is using to receive requests, the **CONTRACT ID** is specific contract you wish to interact with and the **FIELD** is the data type you wish to get from the contract and the **UTXO** is the bound UTXO which you want to received the data associated with.
+  - SCL amount bound to UTXO: {URl}:{Port}/{Contract ID}/owner/{UTXO}
     - Returns an SCL amount bound to the UTXO as a number
 
   -  Listings for order ID: {URl}:{Port}/{Contract ID}/listing/{listing_utxo}
@@ -109,13 +133,13 @@ Server Requests
      - Returns a Bid object
 
   -  Bids for order ID: {URl}:{Port}/{Contract ID}/bids_on_listing/{listing_utxo}
-     - Returns a HashMap of bid IDs and thier corresponsing Bid objects for a given listing
+     - Returns a HashMap of bid IDs and their corresponding Bid objects for a given listing
 
   -  Bids for order ID: {URl}:{Port}/{Contract ID}/bids_on_listing/{listing_utxo}
-     - Returns a HashMap of bid IDs and thier corresponsing Bid objects for a given listing as well as the listing object
+     - Returns a HashMap of bid IDs and their corresponding Bid objects for a given listing as well as the listing object
 
   -  Listing for bid utxo: {URl}:{Port}/{Contract ID}/listing_for_bid/{bidding_utxo}
-     - Returns a HashMap of bid IDs and thier corresponsing Bid objects for a given listing
+     - Returns a HashMap of bid IDs and their corresponding Bid objects for a given listing
      
 - Pending UTXOS
     - Requests for pending commands can be done by preceding fields in the above contract requests with "pending-"
@@ -124,12 +148,12 @@ Server Requests
 ## Post Requests
 - ### Commands
   - Send payload to be processed: {URl}:{Port}/commands
-    - Json body for post is a command struct which contains a txid string and a payload string
+    - Json body for post is a command struct which contains a TXID string and a payload string.
   
 - ### Check If Utxos are bound
-  - Send list of utxos to be checked if they are bound: {URl}:{Port}/check_utxos
+  - Send list of UTXOs to be checked if they are bound: {URl}:{Port}/check_utxos
     - Json body for the post is a CheckBalancesResult object
-    - A list of UtxoBalanceResult objects will be return being the same length of the utxos sent, with the balance_type of  indicatting what it is bound to.
+    - A list of UtxoBalanceResult objects will be return being the same length of the UTXOs sent, with the balance_type of  indicating what it is bound to.
       - If the balance value is 0 the utxo is unbound
       - If the balance type starts with O- it means it is a bid and the SCL owner amount is contained in the balance_value
       - If the balance type starts with B- it means it is a bid and the SCL bid amount is contained in the balance_value
@@ -143,28 +167,30 @@ Server Requests
     - A list of contract summary object with trade and contract information will be return being the same length of the contract ids sent
 
 - ### Listing summaries
-  - Send list of contract_ids and listing utxos to get summaries for the contracts: {URl}:{Port}/listing_summaries
+  - Send list of contract_ids and listing UTXOs to get summaries for the contracts: {URl}:{Port}/listing_summaries
     - Json body for the post is a list of trade utxo request objects
     - A list of contract trade response response objects with trade information will be returned
 
 - ### Listing Trade summaries
-  - Send list of contract_ids and bid utxos to get summaries for the contracts: {URl}:{Port}/bid_utxo_trade_info
+  - Send list of contract_ids and bid UTXOs to get summaries for the contracts: {URl}:{Port}/bid_utxo_trade_info
     - Json body for the post is a list of trade utxo request objects
-    - A list of contract lising response objects with listing and contract information will be returned
+    - A list of contract listing response objects with listing and contract information will be returned
 
 - ### Txid contract history
   - Send list of contract_ids and order ids to get summaries for the contracts: {URl}:{Port}/check_txids_history
     - Json body for the post is a cancel request object
-    - A list of txid check response objects with payload  information will be returned
+    - A list of TXID check response objects with payload  information will be returned
   
 <br>
 
   ## Sending Data Types
   ```
-    pub struct CommandStruct {
+pub struct CommandStruct {
     pub txid: String,
     pub payload: String,
-  }
+    pub bid_payload : Option<Vec<BidPayload>>,
+    pub contract_id : Option<String>
+}
 
   pub struct UtxoBalances {
     pub contract_ids: Vec<String>,
@@ -210,7 +236,9 @@ pub struct SCL01Contract {
     pub pending_claims: Option<HashMap<String, u64>>,
     pub last_airdrop_split: Option<Vec<String>>,
     pub right_to_mint: Option<HashMap<String, u64>>,
-    pub max_supply: Option<u64>
+    pub max_supply: Option<u64>,
+    pub liquidated_tokens: Option<u64>,
+    pub liquidity_pool: Option<LiquidityPool>,
 }
 
   HashMap<String, Listing>
@@ -258,7 +286,6 @@ pub struct DimAirdrop {
     pub last_airdrop_split: Option<Vec<String>>,
     pub single_drop: bool,
     pub claimers: HashMap<String, u64>
-
 }
 
 pub struct DGE {
@@ -270,6 +297,23 @@ pub struct DGE {
     pub drip_duration: u64,
     pub single_drop: bool,
     pub donaters: HashMap<String, u64>
+}
+
+pub struct LiquidityProvider {
+    pub provided_block_height: u32,
+    pub lp_tokens: u64,
+}
+
+pub struct LiquidityPool {
+    pub contract_id_1: String,
+    pub contract_id_2: String,
+    pub pool_1: u64,
+    pub pool_2: u64,
+    pub fee: f32,
+    pub k: u128,
+    pub liquidity_ratio: f32,
+    pub swaps: HashMap<String, (u64,u64)>,
+    pub liquidations: HashMap<String, (u64,u64)>
 }
 
   pub struct ContractImport {

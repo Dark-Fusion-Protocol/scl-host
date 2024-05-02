@@ -15,6 +15,7 @@ pub struct CommandStruct {
     pub txid: String,
     pub payload: String,
     pub bid_payload : Option<Vec<BidPayload>>,
+    pub contract_id : Option<String>
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -22,6 +23,7 @@ pub struct RelayedCommandStruct {
     pub txid: String,
     pub payload: String,
     pub bid_payload : Option<Vec<BidPayload>>,
+    pub contract_id : Option<String>,
     pub key: String
 }
 
@@ -30,6 +32,7 @@ pub struct PendingCommandStruct {
     pub txid: String,
     pub payload: String,
     pub bid_payload : Option<Vec<BidPayload>>,
+    pub contract_id : Option<String>,
     pub time_added: String,
 }
 
@@ -52,7 +55,7 @@ pub struct ResultStruct {
 }
 
 // Stucts for Http client calls
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TxInfo {
     pub txid: Option<String>,
     pub vout: Option<Vec<Vout>>,
@@ -61,7 +64,7 @@ pub struct TxInfo {
     pub fee: Option<u64>
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Vout {
     pub scriptpubkey: Option<String>,
     pub scriptpubkey_asm: Option<String>,
@@ -69,13 +72,13 @@ pub struct Vout {
     pub scriptpubkey_address: Option<String>,
     pub value: Option<u64>,
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Vin {
     pub txid: String,
     pub vout: u32,
     pub prevout: Option<Vout>
 }
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Status {
     pub confirmed: Option<bool>,
     pub block_height: Option<u64>,
@@ -185,8 +188,6 @@ pub struct ContractHistoryEntry{
 pub struct Config {
     pub block_height: i32,
     pub memes: Vec<String>,
-    pub sorting: bool,
-    pub sort_again: bool,
     pub reserved_tickers: Option<Vec<String>>,
     pub hosts_ips: Option<Vec<String>>,
     pub my_ip_split: Option<Vec<u8>>,
@@ -232,7 +233,9 @@ pub struct ContractSummary {
     pub current_bids: u64,
     pub available_airdrops: Option<u64>,
     pub airdrop_amount: Option<u64>,
-    pub max_supply: Option<u64>
+    pub max_supply: Option<u64>,
+    pub lp_contracts: Option<(String,String)>,
+    pub lp_ratio: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -258,6 +261,24 @@ pub struct BidData {
     pub fulfill_tx: String,
     pub accept_tx: String,
     pub reseved_utxo:String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Default)]
+pub struct Lookups {
+    pub lps: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct LiquidityPoolString {
+    pub contract_id_1: String,
+    pub contract_id_2: String,
+    pub pool_1: String,
+    pub pool_2: String,
+    pub fee: String,
+    pub k: String,
+    pub liquidity_ratio: String,
+    pub swaps: HashMap<String, (u64,u64)>,
+    pub liquidations: HashMap<String, (u64,u64)>
 }
 
 #[derive(Debug, Deserialize, Serialize,)]
@@ -291,7 +312,7 @@ pub fn read_from_file(relative_path: String) -> Option<String> {
 }
 
 pub fn write_contract_directory(relative_path: String, data: String, contract_id: &str,) -> bool {
-       if !fs::metadata(format!("./Json/Contracts/{}", &contract_id)).is_ok() {
+    if !fs::metadata(format!("./Json/Contracts/{}", &contract_id)).is_ok() {
         let _  = fs::create_dir(format!("./Json/Contracts/{}", &contract_id));
     }
 
@@ -354,12 +375,12 @@ pub fn read_queue(path: String) -> Result<Vec<(PendingCommandStruct,String)>, St
                             Ok(data_str) => data_str,
                             Err(_) => continue,
                         };
-
+                        
                         let json_object: PendingCommandStruct = match serde_json::from_str(&data_str) {
                             Ok(json_object) => json_object,
                             Err(_) => continue,
                         };
-
+                        
                         json_objects.push((json_object, entry.path().to_string_lossy().to_string()));
                     }
                     Err(_) => return Err("Error reading directory".to_string()),
@@ -419,7 +440,7 @@ pub fn extract_commands(payload: &str)-> Result<Vec<String>, String> {
     })
     .collect();
 
-    if matches.len() > 1 && payload.contains("SCL01") {
+    if matches.len() > 1 && payload.contains("SCL") {
         return Err("Mint command cannot be batched".to_string());
     }
 
@@ -435,17 +456,8 @@ pub fn extract_contract_id(payload: &str)->Result<String, String>{
     return Ok(trimmed_str.to_string());
 }
 
-pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str, explora_url:String) -> bool {
-    let url = explora_url + "tx/" + &txid;
-    let response = match handle_get_request(url.clone()).await {
-        Some(response) => response,
-        None => {
-            println!("No response from esplora: {}", url);
-            return false
-        },
-    };
-    
-    let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
+pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str) -> bool {
+    let tx_info: TxInfo = match get_transaction(txid, false).await {
         Ok(tx_info) => tx_info,
         Err(_) => return false,
     };
@@ -470,6 +482,59 @@ pub async fn check_utxo_inputs(utxos: &Vec<String>, txid: &str, explora_url:Stri
     return true;
 }
 
+pub async fn get_transaction(txid: &str, update: bool) -> Result<TxInfo, String> {
+    let path = format!("./Json/TXs/{}.txt",txid);
+    if !fs::metadata(&path).is_ok() || update {
+        let config = match read_server_config(){
+            Ok(config) => config,
+            Err(_) => Config::default(),
+        };
+        
+        let esplora = match config.esplora{
+            Some(esplora) => esplora,
+            None => "https://btc.darkfusion.tech/".to_owned(),
+        };
+    
+        let url = esplora + "tx/" + &txid;
+        let response = match handle_get_request(url.clone()).await {
+            Some(response) => response,
+            None => {
+                println!("No response from esplora: {}", url);
+                return Err("No response from esplora".to_string())
+            },
+        };
+        
+        let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
+            Ok(tx_info) => tx_info,
+            Err(_) => return Err("No response from esplora".to_string()),
+        };
+
+        match serde_json::to_string(&tx_info) {
+            Ok(tx_str) => write_to_file(path, tx_str),
+            Err(_) => return Err("Failed to read lookups".to_string()),
+        };
+
+        return Ok(tx_info);
+    }else{
+        let data = match fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(err) =>  return Err(err.to_string())
+        };
+
+        let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&data) {
+            Ok(tx_info) => tx_info,
+            Err(_) => return Err("Unable to read TX in lookup".to_string()),
+        };
+
+        return Ok(tx_info);
+    }
+}
+
+pub fn remove_transaction(txid: &str){
+    let path = format!("./Json/TXs/{}.txt",txid);
+    let _ = fs::remove_file(&path);
+}
+
 pub async fn check_utxo_spent(utxo: &str, esplora: &String) -> Result<bool, String> {
     let split:  Vec<&str> =  utxo.split(":").collect();
     if split.len() < 2 {
@@ -481,11 +546,32 @@ pub async fn check_utxo_spent(utxo: &str, esplora: &String) -> Result<bool, Stri
         Some(response) => response,
         None => return Err("No response from espolra".to_string())
     };
-    
+
     match serde_json::from_str::<SpentResult>(&response) {
         Ok(result) => return Ok(result.spent),
         Err(err) => return Err(err.to_string())
     };
+}
+
+pub async fn get_tx_inputs(txid: &str) -> Result<Vec<String>, String>{
+    let tx_info: TxInfo = match get_transaction(txid, false).await {
+        Ok(tx_info) => tx_info,
+        Err(_) => return Err("Unable to get inputs for txid".to_string()),
+    };
+
+    //capture the senders for input validation
+    let inputs = match &tx_info.vin {
+        Some(v) => v,
+        None => return Err("Unable to get inputs for txid".to_string()),
+    };
+
+    let mut input_str: Vec<String> = Vec::new();
+    for input in inputs {
+        let c = format!("{}:{}", &input.txid, &input.vout);
+        input_str.push(c);
+    }
+
+    return Ok(input_str);
 }
 
 pub async fn check_txid_confirmed(txid: &str) -> Result<bool, String> {
@@ -524,12 +610,12 @@ pub async fn check_txid_confirmed(txid: &str) -> Result<bool, String> {
     return Ok(confirmed);
 }
 
-pub async fn get_current_block_height() -> Result<i32, String>{
+pub async fn get_current_block_height_from_esplora() -> Result<i32, String>{
     let config = match read_server_config(){
         Ok(config) => config,
         Err(_) => Config::default(),
     };
-
+    
     let esplora = match config.esplora{
         Some(esplora) => esplora,
         None => "https://btc.darkfusion.tech/".to_owned(),
@@ -545,6 +631,15 @@ pub async fn get_current_block_height() -> Result<i32, String>{
         Ok(block_height) => return Ok(block_height),
         Err(_) => return Err("Can't get response from esplora about current block height".to_string()),
     };
+}
+
+pub async fn get_current_block_height() -> Result<i32, String>{
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => return Err("Could not read config file".to_string()),
+    };
+
+    return Ok(config.block_height);
 }
 
 pub fn get_contract_header(contract_id: &str) -> Result<ContractImport, String> {
@@ -622,6 +717,37 @@ pub fn save_server_config(config: Config) -> Result<String, String> {
     };
 
     return Ok("Successfully saves config".to_string());
+}
+
+pub fn read_server_lookup() -> Result<Lookups, String> {
+    let path = format!("./Json/lookups.txt");
+    if !fs::metadata(&path).is_ok() {
+        match serde_json::to_string(&Lookups::default()) {
+            Ok(lookups_str) => write_to_file(path.clone(), lookups_str),
+            Err(_) => return Err("Unable to read the server lookups file".to_string()),
+        };
+    }
+
+    let data = match fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(err) =>  return Err(err.to_string())
+    };
+
+    let parsed_data: Result<Lookups, _> = serde_json::from_str(&data);
+    match parsed_data {
+        Ok(data) => return Ok(data),
+        Err(_) => return Err("Failed to deserialize contract".to_string())
+    }
+}
+
+pub fn save_server_lookup(lookups: Lookups) -> Result<String, String> {
+    let path = format!("./Json/lookups.txt");
+    match serde_json::to_string(&lookups) {
+        Ok(lookups_str) => write_to_file(path, lookups_str),
+        Err(_) => return Err("Failed to saved lookups".to_string()),
+    };
+
+    return Ok("Successfully saves lookups".to_string());
 }
 
 pub fn read_contract_interactions(contract_id: &str) -> Result<ContractInteractions, String> {

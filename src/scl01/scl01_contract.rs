@@ -21,8 +21,11 @@ pub struct SCL01Contract {
     pub pending_claims: Option<HashMap<String, u64>>,
     pub last_airdrop_split: Option<Vec<String>>,
     pub right_to_mint: Option<HashMap<String, u64>>,
-    pub max_supply: Option<u64>
+    pub max_supply: Option<u64>,
+    pub liquidated_tokens: Option<u64>,
+    pub liquidity_pool: Option<LiquidityPool>,
 }
+
 
 impl SCL01Contract {
     pub fn right_to_mint(&mut self, txid: &String, payload: &String, rtm: &String, reciever: &String, change_utxo: &String, mint_amount: &u64)-> Result<(String, u64, bool), String>{
@@ -179,7 +182,22 @@ impl SCL01Contract {
                         drips.remove(&sender_utxo);
                     }
                 }
-            }         
+            }
+
+            let last_index = receivers.len() - 1;
+            let mut drip_ret = 0;
+            if !new_drips.is_empty() {
+                let last_receiver = &receivers[last_index].0.clone();       
+                drips.insert(last_receiver.clone(), new_drips);
+                let blocks_dripped = owners_amount - total_value;
+            
+                if let Some(owned) = self.owners.get_mut(last_receiver) {
+                    *owned += blocks_dripped;
+                    drip_ret = *owned;
+                }
+            }
+            
+            
 
             let mut recievers_drips_present: Vec<bool> = Vec::new(); 
             for entry in receivers.clone() {
@@ -192,20 +210,6 @@ impl SCL01Contract {
                     recievers_drips_present.push(true);
                 }else{
                     recievers_drips_present.push(false);
-                }
-            }
-
-            let last_index = receivers.len() - 1;
-            let mut drip_ret = 0;   
-            if !new_drips.is_empty() {
-                let last_receiver = &receivers[last_index].0.clone();       
-                drips.insert(last_receiver.clone(), new_drips);
-                let amount_dripped_in_block = owners_amount - total_value;
-
-                if self.owners.contains_key(last_receiver){
-                    let owned_amount = self.owners[last_receiver];
-                    self.owners.insert(last_receiver.clone(), amount_dripped_in_block + owned_amount);
-                    drip_ret = amount_dripped_in_block + owned_amount;
                 }
             }
 
@@ -1062,6 +1066,310 @@ impl SCL01Contract {
         self.payloads.insert(txid.to_string(), payload.to_string());
         return Ok(new_owner);
     }
+
+    pub fn provide_liquidity(&mut self, txid: &String, payload: &String, sender_utxos: &Vec<String>, liquidation_amount: u64, block_height: u64, is_contract_1: bool) -> Result<(String,u64,bool), String> {
+        let mut owners_amount: u64 = 0;
+        for sender_utxo in sender_utxos.clone() {
+            if self.owners.contains_key(&sender_utxo) {
+                owners_amount += self.owners[&sender_utxo];
+            }
+        }
+        if owners_amount == 0 {
+            return Err("provide_liquidity: owner amount is zero".to_string());
+        }
+
+        if liquidation_amount <= owners_amount {
+            let mut owned_senders: Vec<String> = Vec::new();
+            for sender_utxo in sender_utxos.clone() {
+                if self.owners.contains_key(&sender_utxo.clone()) {
+                    self.owners.remove(&sender_utxo);
+                    owned_senders.push(sender_utxo);
+                }
+            }
+
+            let mut change_utxo = format!("{}:1",txid);
+            if !is_contract_1 {
+                change_utxo = format!("{}:2",txid);
+            }
+
+            let change_drip_present = self.transfer_drips(&owned_senders, block_height, &change_utxo);
+            let liquidated_tokens = match self.liquidated_tokens.clone() {
+                Some(liquidated_tokens) => liquidated_tokens,
+                None => 0,
+            };
+
+            let change = owners_amount - liquidation_amount;
+            if change > 0 {
+                match self.owners.get(&change_utxo) {
+                    Some(&e) => self.owners.insert(change_utxo.clone(), &e + change),
+                    None => self.owners.insert(change_utxo.clone(), change)
+                };
+            }
+
+            self.payloads.insert(txid.to_string(), payload.to_string());
+            self.liquidated_tokens = Some(liquidated_tokens + liquidation_amount);
+            return Ok((change_utxo, change, change_drip_present));
+        } else{
+            return Err("provide_liquidity: owner amount is less than the liquidation amount ".to_string());
+        }
+    }
+
+    pub fn swap_claim(&mut self, txid: &String, payload: &String, sender_utxos: &Vec<String>, swap_amount: u64, block_height: u64) -> Result<(String, u64, bool), String> {
+        let mut owners_amount: u64 = 0;
+        for sender_utxo in sender_utxos.clone() {
+            if self.owners.contains_key(&sender_utxo) {
+                owners_amount += self.owners[&sender_utxo];
+            }
+        }
+
+        let liquidated_tokens = match self.liquidated_tokens.clone() {
+            Some(liquidated_tokens) => liquidated_tokens,
+            None => 0,
+        };
+
+        if owners_amount == 0 {
+            return Err("swap_claim: owner amount is zero".to_string());
+        }
+
+        if swap_amount <= owners_amount {
+            for sender_utxo in sender_utxos.clone() {
+                if self.owners.contains_key(&sender_utxo.clone()) {
+                    self.owners.remove(&sender_utxo);
+                }
+            }
+
+            let change_utxo = format!("{}:1", txid);
+            let change_drip_present = self.transfer_drips(sender_utxos, block_height, &change_utxo);
+            let change = owners_amount - swap_amount;
+            if change > 0 {
+                match self.owners.get(&change_utxo) {
+                    Some(&e) => self.owners.insert(change_utxo.clone(), &e + change),
+                    None => self.owners.insert(change_utxo.clone(), change)
+                };
+            }
+
+            self.payloads.insert(txid.to_string(), payload.to_string());
+            self.liquidated_tokens = Some(liquidated_tokens + swap_amount);
+            return Ok((change_utxo, change, change_drip_present));
+        } else{
+            return Err("swap_claim: owner amount is less swapped amount ".to_string());
+        }
+    }
+
+    pub fn swap_recieve(&mut self, txid: &String, payload: &String, swap_amount: u64) -> Result<(String, u64), String> {
+        if swap_amount == 0 {
+            return Err("swap_recieve: swap was not within tolerance".to_string());
+        }
+
+        let liquidated_tokens = match self.liquidated_tokens.clone() {
+            Some(liquidated_tokens) => liquidated_tokens,
+            None => return Err("swap_recieve: contract has no lp tokens assigned".to_string()),
+        };
+
+        let reciever_utxo = format!("{}:0", txid);
+        match self.owners.get(&reciever_utxo) {
+            Some(&e) => self.owners.insert(reciever_utxo.clone(), &e + swap_amount),
+            None => self.owners.insert(reciever_utxo.clone(), swap_amount)
+        };
+
+        self.liquidated_tokens = Some(liquidated_tokens - swap_amount);
+        self.payloads.insert(txid.to_string(), payload.to_string());
+        return Ok((reciever_utxo, swap_amount));
+    }
+
+    pub fn liquidate_position(&mut self, txid: &String, payload: &String, amount: u64, is_contract_1:bool) -> Result<(String, u64, bool), String> {
+        let mut liquidated_tokens = match self.liquidated_tokens.clone() {
+            Some(liquidated_tokens) => liquidated_tokens,
+            None => return Err("liquidate_position: contract has no lp tokens assigned".to_string()),
+        };
+
+        let drips = match self.drips.clone() {
+            Some(drips) => drips,
+            None => HashMap::new(),
+        };
+
+        liquidated_tokens -= amount;
+        let mut reciever_utxo: String =  format!("{}:1", txid);
+        if !is_contract_1 {
+            reciever_utxo =  format!("{}:2", txid);
+        }
+        let mut new_owner = (reciever_utxo.to_string(), 0, false);
+        if self.owners.contains_key(&reciever_utxo) {
+            let new_amount = self.owners[&reciever_utxo] + amount;
+            new_owner.1 = new_amount.clone();
+            self.owners.insert(reciever_utxo.to_string(), new_amount);
+        } else {
+            new_owner.1 = amount;
+            self.owners.insert(reciever_utxo.to_string(), amount);
+        }
+
+        if drips.contains_key(&reciever_utxo) {
+            new_owner.2 = true;
+        }
+
+        self.liquidated_tokens = Some(liquidated_tokens);
+        self.payloads.insert(txid.to_string(), payload.to_string());
+        return Ok(new_owner);
+    }
+
+    pub fn provide_liquidity_lp(&mut self, txid: &str, payload: &str, provided_amount: u64)-> Result<(String, u64), String>{
+        let mut liquidity_pool = match self.liquidity_pool.clone() {
+            Some(liquidity_pool) => liquidity_pool,
+            None =>  return  Err("provide_liquidity_lp: no liquidity pools".to_string()),
+        };
+        
+        liquidity_pool.pool_1 += provided_amount;
+        let ratio_amount:u64 = (provided_amount as f64 * liquidity_pool.liquidity_ratio as f64) as u64;
+        liquidity_pool.pool_2 += provided_amount;
+        self.supply += provided_amount + ratio_amount;
+        if (provided_amount / ratio_amount) as f32 != liquidity_pool.liquidity_ratio {
+            return Err("provide_liquidity_lp: liquidity not provided in the correct ratio".to_string())
+        }
+
+        let lp_utxo = format!("{}:0", txid);
+        self.owners.insert(lp_utxo.to_string(), provided_amount + ratio_amount);
+        liquidity_pool.k = liquidity_pool.pool_1 as u128 * liquidity_pool.pool_2 as u128;
+        self.liquidity_pool = Some(liquidity_pool);
+        self.payloads.insert(txid.to_string(), payload.to_string());
+        return Ok((lp_utxo, provided_amount + ratio_amount));
+    }
+
+    pub fn swap_lp(&mut self, txid: &str, payload: &str, sender_contract_id: String, provided_amount: u64, quoted: u64, slipage_tolerance: f32)-> Result<u64, String>{
+        let sender_pool_amount;
+        let reciever_pool_amount;
+        let mut liquidity_pool = match self.liquidity_pool.clone() {
+            Some(liquidity_pool) => liquidity_pool,
+            None =>  return  Err("swap_lp: no liquidity pools".to_string()),
+        };
+
+        if  sender_contract_id == liquidity_pool.contract_id_1 {
+            sender_pool_amount = liquidity_pool.pool_1;
+            reciever_pool_amount = liquidity_pool.pool_2;
+        }else if sender_contract_id == liquidity_pool.contract_id_2  {
+            sender_pool_amount = liquidity_pool.pool_2;
+            reciever_pool_amount = liquidity_pool.pool_1;
+        }else{
+            return Err("swap_lp: contract_id not associated with this liquidity pool".to_string());
+        }
+
+        let fee_diff  = provided_amount as f64 * (1.0 - liquidity_pool.fee) as f64;
+        let mut swap_amount = ((reciever_pool_amount as f64) - (liquidity_pool.k as f64 /(sender_pool_amount as f64 + fee_diff))) as u64;
+
+        if swap_amount >  reciever_pool_amount {
+            swap_amount = reciever_pool_amount;
+        }
+
+        if swap_amount.abs_diff(quoted) as f32 / quoted  as f32 > slipage_tolerance {
+            if swap_amount >= quoted {
+                println!("swap_lp: swap amount is above tolerence: {}", swap_amount);
+                swap_amount = (quoted as f32 * (1.0 + slipage_tolerance)) as u64;        
+            }else{
+                println!("swap_lp: swap amount is below tolerence");
+                return Ok(0);
+            }
+        }
+
+        if  sender_contract_id == liquidity_pool.contract_id_1 {
+            liquidity_pool.pool_1 += provided_amount;
+            liquidity_pool.pool_2 -= swap_amount;
+        }else{
+            liquidity_pool.pool_2 += provided_amount;
+            liquidity_pool.pool_1 -= swap_amount;
+        }
+        
+        liquidity_pool.k = liquidity_pool.pool_2 as u128 * liquidity_pool.pool_1 as u128;
+        liquidity_pool.swaps.insert(txid.to_string(), (provided_amount, swap_amount));
+        self.liquidity_pool = Some(liquidity_pool);
+        self.payloads.insert(txid.to_string(), payload.to_string());
+        return Ok(swap_amount);
+    }
+
+    pub fn liquidate_postion_lp(&mut self, txid: &str, payload: &str, lp_utxos: &Vec<String>, claim_amount: u64, block_height: u64)-> Result<(u64, u64, String, u64, bool), String>{
+        let mut liquidity_pool = match self.liquidity_pool.clone() {
+            Some(liquidity_pool) => liquidity_pool,
+            None =>  return  Err("liquidate_postion_lp: no liquidity pools".to_string()),
+        };
+
+        let mut total_tokens = 0;
+        for lp_utxo in lp_utxos.clone() {
+            if self.owners.contains_key(&lp_utxo) {
+                total_tokens += self.owners[&lp_utxo];
+            }
+        }
+
+        if total_tokens == 0 {
+            return Err("liquidate_postion_lp: owner amount is zero".to_string());
+        }
+        
+        if total_tokens >= claim_amount {    
+            for utxo  in lp_utxos {
+                self.owners.remove(utxo);
+            };
+    
+            let change_utxo: String =  format!("{}:0", txid);
+            let change_drip_present = self.transfer_drips(lp_utxos, block_height, &change_utxo);
+            let change = total_tokens - claim_amount;
+            let lp_token_ratio =  claim_amount as f64 / self.supply as f64;
+            let token_1 =  (liquidity_pool.pool_1 as f64 * lp_token_ratio) as u64;
+            let token_2 =  (liquidity_pool.pool_2 as f64 * lp_token_ratio) as u64;
+            liquidity_pool.pool_1 -= token_1;
+            liquidity_pool.pool_2 -= token_2;
+    
+    
+            if change > 0 {
+                self.owners.insert(change_utxo.to_string(), change);
+            }
+            
+            liquidity_pool.k = liquidity_pool.pool_1 as u128 * liquidity_pool.pool_2 as u128;
+            liquidity_pool.liquidations.insert(txid.to_string(), (token_1, token_2));
+            self.liquidity_pool = Some(liquidity_pool);
+            self.supply -= claim_amount;
+            self.payloads.insert(txid.to_string(), payload.to_string());
+            return Ok((token_1, token_2, change_utxo, change, change_drip_present));
+        }else{
+            return Err("liquidate_postion_lp: owner amount is less than the claim amount ".to_string());
+        }
+
+
+    }
+
+    fn transfer_drips(&mut self, utxos: &Vec<String>, block_height: u64, change_utxo: &String) -> bool{
+        let mut drips = match self.drips.clone() {
+            Some(drips) => drips,
+            None => HashMap::new(),
+        };
+
+        let mut change_drip_present = false;
+        let mut new_drips: Vec<Drip> = Vec::new();
+        for utxo in utxos.clone() {
+            if self.owners.contains_key(&utxo.clone()) {
+                if let Some(old_drips) = drips.get(&utxo) {
+                    for drip in old_drips {
+                        let new_drip = Drip {
+                            block_end: drip.block_end.clone(),
+                            drip_amount: drip.drip_amount.clone(),
+                            amount: drip.amount.clone() - (block_height - drip.start_block) * drip.drip_amount,
+                            start_block: block_height,
+                            last_block_dripped: block_height
+                        };
+
+                        new_drips.push(new_drip.clone());
+                    }
+                    
+                    // Remove the old drip from the vector
+                    drips.remove(&utxo);
+                }
+            }
+        }
+
+        if !new_drips.is_empty() {    
+            change_drip_present = true;
+            drips.insert(change_utxo.clone(), new_drips);
+        }
+
+        self.drips = Some(drips);
+        return change_drip_present;
+    }
 }
 
 #[derive(Debug, Deserialize, Default, Serialize, Clone,PartialEq)]
@@ -1120,4 +1428,23 @@ pub struct Bid {
     pub accept_tx: String,
     pub reseved_utxo:String,
     pub fullfilment_utxos: Vec<String>
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct LiquidityProvider {
+    pub provided_block_height: u32,
+    pub lp_tokens: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct LiquidityPool {
+    pub contract_id_1: String,
+    pub contract_id_2: String,
+    pub pool_1: u64,
+    pub pool_2: u64,
+    pub fee: f32,
+    pub k: u128,
+    pub liquidity_ratio: f32,
+    pub swaps: HashMap<String, (u64,u64)>,
+    pub liquidations: HashMap<String, (u64,u64)>
 }

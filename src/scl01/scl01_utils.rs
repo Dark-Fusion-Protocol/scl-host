@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use hex::decode;
-use bitcoin::{consensus::deserialize, Transaction};
+use bitcoin::{consensus::deserialize, Transaction, Address};
 use regex::Regex;
 use std::fs;
-use crate::{utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_server_config, replace_payload_special_characters, save_contract_interactions, write_contract_directory, write_to_file, Config, ContractImport, FulfilledSummary, TradeTx, TxInfo}, scl01::scl01_contract::{DimAirdrop, DGE}};
-use bitcoin::Address;
-use super::scl01_contract::{SCL01Contract, Bid, Listing};
+use crate::{scl01::scl01_contract::{DimAirdrop, DGE}, utils::{check_utxo_inputs, extract_contract_id, get_current_block_height, get_tx_inputs, get_txid_from_hash, get_utxos_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_server_config, read_server_lookup, replace_payload_special_characters, save_contract_interactions, save_server_lookup, write_contract_directory, write_to_file, Config, ContractImport, FulfilledSummary, Lookups, TradeTx, TxInfo}};
+use super::scl01_contract::{Bid, LiquidityPool, Listing, SCL01Contract};
 
 pub fn perform_minting_scl01(txid: &str, payload: &str) {
-    match read_contract_scl01(txid, false) {
+    match read_contract(txid, false) {
         Ok(_) => return,
         Err(_) => {},
     };
@@ -43,6 +42,8 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
             last_airdrop_split: None,
             right_to_mint: None,
             max_supply: Some(*max_supply),
+            liquidated_tokens: None,
+            liquidity_pool: None,
         };
          let data = format!("{}:O-,{}", &new_contract.contractid,&max_supply);
          match fs::write(format!("./Json/UTXOS/{}.txt", &txid_n.clone()),data.clone(),){
@@ -84,7 +85,7 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
 }
 
 pub fn perform_minting_scl02(txid: &str, payload: &str) {
-    match read_contract_scl01(txid, false) {
+    match read_contract(txid, false) {
         Ok(_) => return,
         Err(_) => {},
     };
@@ -154,7 +155,9 @@ pub fn perform_minting_scl02(txid: &str, payload: &str) {
             diminishing_airdrops: None,
             dges: None,
             right_to_mint: None,
-            max_supply: Some(max_supply)
+            max_supply: Some(max_supply),
+            liquidated_tokens: None,
+            liquidity_pool: None,
         };
 
         match serde_json::to_string(&new_contract) {
@@ -191,7 +194,7 @@ pub fn perform_minting_scl02(txid: &str, payload: &str) {
 }
 
 pub fn perform_minting_scl03(txid: &str, payload: &str) {
-    match read_contract_scl01(txid, false) {
+    match read_contract(txid, false) {
         Ok(_) => return,
         Err(_) => {},
     };
@@ -223,7 +226,9 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
             pending_claims: None,
             last_airdrop_split: None,
             right_to_mint: Some(captures.2),
-            max_supply: Some(max_supply)
+            max_supply: Some(max_supply),
+            liquidated_tokens: None,
+            liquidity_pool: None,
         };
 
         match serde_json::to_string(&new_contract) {
@@ -259,13 +264,13 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
     }   
 }
 
-pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
+pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pending: bool){
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -280,7 +285,7 @@ pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pe
     };
 
     let utxos: Vec<String>  = vec![results.0.clone()];
-    if !check_utxo_inputs(&utxos, &txid, esplora.clone()).await {      
+    if !check_utxo_inputs(&utxos, &txid).await {      
         return;
     }
 
@@ -289,7 +294,7 @@ pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pe
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
 
     if !pending {
         let mut data = format!("{}:O-,{}", &contract.contractid,new_owners.1);
@@ -298,7 +303,7 @@ pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pe
         }
 
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
    }else{
         let mut data = format!("{}:P-O-,{}", &contract.contractid,new_owners.1);
         if new_owners.2 {
@@ -315,7 +320,7 @@ pub fn perform_airdrop(txid: &str,command: &str, payload: &str, pending: bool) {
         Err(_) => return,
     };
 
-     let contract_pending = match read_contract_scl01(contract_id.as_str(), true) {
+     let contract_pending = match read_contract(contract_id.as_str(), true) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -325,7 +330,7 @@ pub fn perform_airdrop(txid: &str,command: &str, payload: &str, pending: bool) {
         None => HashMap::new(),
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), false) {
+    let mut contract = match read_contract(contract_id.as_str(), false) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -355,9 +360,9 @@ pub fn perform_airdrop(txid: &str,command: &str, payload: &str, pending: bool) {
         write_to_file(format!("./Json/UTXOS/{}.txt", &reciever),data.clone(),);
     }
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
     }
 }
 
@@ -372,17 +377,17 @@ pub fn perform_airdrop_split(mut contract: SCL01Contract){
         write_to_file(format!("./Json/UTXOS/{}.txt", &owner.0),data.clone()); 
     }
 
-    let _ = save_contract_scl01(&contract, "", "", true);
-    let _ = save_contract_scl01(&contract, "", "", false);
+    let _ = save_contract(&contract, "", "", true);
+    let _ = save_contract(&contract, "", "", false);
 }
 
-pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String) {
+pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -396,7 +401,7 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
         Err(_) => return,
     };
 
-    if !check_utxo_inputs(&results.0, &txid, esplora.clone()).await {        
+    if !check_utxo_inputs(&results.0, &txid).await {        
         return;
     }
 
@@ -410,7 +415,7 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
         Err(_) => return,
     };
     
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
         for s in &results.0{
             let file_path = format!("./Json/UTXOS/{}.txt", s);
@@ -434,7 +439,7 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
             };
         }
 
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
 
         let mut interactions =  match read_contract_interactions(&contract_id) {
             Ok(interactions) => interactions,
@@ -455,9 +460,9 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
            for (index, (key,value)) in results.1.iter().enumerate() {
             let mut data= format!("{}:P-O-,{}", &contract.contractid,value);
             if drip.0[index] && index == results.1.len() - 1 {
-                data = format!("{}:P-DO-,{}", &contract.contractid, drip.1); 
+                data = format!("{}:DO-,{}", &contract.contractid, drip.1); 
             }else if drip.0[index]  {
-                data = format!("{}:P-DO-,{}", &contract.contractid, value); 
+                data = format!("{}:DO-,{}", &contract.contractid, value); 
             }
 
              match fs::write(format!("./Json/UTXOS/{}.txt", &key),data.clone(),){
@@ -468,13 +473,13 @@ pub async fn perform_transfer_scl01(txid: &str, command: &str, payload: &str, pe
     }
 }
 
-pub async fn perform_burn_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String) {
+pub async fn perform_burn(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -484,7 +489,7 @@ pub async fn perform_burn_scl01(txid: &str, command: &str, payload: &str, pendin
     }
 
     if let Ok(result) = handle_burn_payload(txid, payload){
-        if !check_utxo_inputs(&result.0, &txid, esplora).await {       
+        if !check_utxo_inputs(&result.0, &txid).await {       
             return;
         }
 
@@ -493,9 +498,9 @@ pub async fn perform_burn_scl01(txid: &str, command: &str, payload: &str, pendin
             Err(_) => return,
         };
     
-        let _ = save_contract_scl01(&contract, payload, txid, true);
+        let _ = save_contract(&contract, payload, txid, true);
         if !pending {
-            let _ = save_contract_scl01(&contract, payload, txid, false);
+            let _ = save_contract(&contract, payload, txid, false);
             let mut interactions =  match read_contract_interactions(&contract_id) {
                 Ok(interactions) => interactions,
                 Err(_) => return,
@@ -510,13 +515,13 @@ pub async fn perform_burn_scl01(txid: &str, command: &str, payload: &str, pendin
     }
 }
 
-pub async fn perform_list_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String) {
+pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -526,7 +531,7 @@ pub async fn perform_list_scl01(txid: &str, command: &str, payload: &str, pendin
     }
 
     if let Ok(result) = handle_list_payload(txid, command){
-        if !check_utxo_inputs(&result.0, &txid, esplora.clone()).await {    
+        if !check_utxo_inputs(&result.0, &txid).await {    
             return;
         }
 
@@ -549,7 +554,7 @@ pub async fn perform_list_scl01(txid: &str, command: &str, payload: &str, pendin
             Err(_) => return,
         };
 
-        let _ = save_contract_scl01(&contract, payload, txid, true);
+        let _ = save_contract(&contract, payload, txid, true);
         if !pending {
             for s in &result.0{
                 let file_path = format!("./Json/UTXOS/{}.txt", s);
@@ -573,7 +578,7 @@ pub async fn perform_list_scl01(txid: &str, command: &str, payload: &str, pendin
             } 
               
             let _ = update_list_utxos(listing.clone(), contract.clone(), false,&result.0[0]);     
-            let _ = save_contract_scl01(&contract, payload, txid, false);
+            let _ = save_contract(&contract, payload, txid, false);
         } else {
             if &new_owner.1 > & 0 {
                 let mut data = format!("{}:P-O-,{}", &contract.contractid,&new_owner.1);
@@ -622,13 +627,13 @@ fn update_list_utxos(listing: Listing, contract: SCL01Contract, pending: bool, o
     return Ok(0);
 }
 
-pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_txs: &Vec<TradeTx>, pending: bool) {    
+pub async fn perform_bid(txid: &str, command: &str, payload: &str, trade_txs: &Vec<TradeTx>, pending: bool) {    
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -757,7 +762,7 @@ pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_t
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, &payload, &txid, true);
+    let _ = save_contract(&contract, &payload, &txid, true);
 
     let default_listings = HashMap::new();
     if !pending {
@@ -776,7 +781,7 @@ pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_t
             write_to_file(format!("./Json/UTXOS/{}.txt", b.reseved_utxo),data.clone());
         }
 
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
         _ = update_list_utxos(l.clone(), contract.clone(), false,&order_id_split.clone());
 
     } else {
@@ -797,13 +802,13 @@ pub async fn perform_bid_scl01(txid: &str, command: &str, payload: &str, trade_t
     }
 }
 
-pub async fn perform_accept_bid_scl01(txid: &str, payload: &str, pending: bool, esplora:String) {
+pub async fn perform_accept_bid(txid: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -843,7 +848,7 @@ pub async fn perform_accept_bid_scl01(txid: &str, payload: &str, pending: bool, 
 
     listing_utxos.push(listings_available[&order_id].list_utxo.clone());
 
-    if !check_utxo_inputs(&listing_utxos, &txid.to_string(), esplora).await {      
+    if !check_utxo_inputs(&listing_utxos, &txid.to_string()).await {      
         return;
     }
 
@@ -864,19 +869,19 @@ pub async fn perform_accept_bid_scl01(txid: &str, payload: &str, pending: bool, 
         }
     }
 
-    let _ =  save_contract_scl01(&contract, payload, txid, true);
+    let _ =  save_contract(&contract, payload, txid, true);
     if !pending {
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
     }
 }
 
-pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
+pub async fn perform_fulfil_bid(txid: &str, payload: &str, pending:bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
     
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -917,7 +922,7 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, &txid, true);
+    let _ = save_contract(&contract, payload, &txid, true);
 
     if !pending {
         for (key,value) in &new_owners{
@@ -925,13 +930,13 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
              write_to_file(format!("./Json/UTXOS/{}.txt", &key),data.clone());
         }
 
-        let _ = save_contract_scl01(&contract, payload, &txid, false);
+        let _ = save_contract(&contract, payload, &txid, false);
         for s in &bids{
             let file_path = format!("./Json/UTXOS/{}.txt", s);
             match fs::remove_file(file_path) {
                 Ok(_) => {},
                 Err(_) => {},
-            }
+            };
         }
 
         let listing_file_path = format!("./Json/UTXOS/{}.txt", listing);
@@ -958,13 +963,13 @@ pub async fn perform_fulfil_bid_scl01(txid: &str, payload: &str, pending:bool) {
     }
 }
 
-pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String) {
+pub async fn perform_drip_start(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -979,7 +984,7 @@ pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, 
     };
     
 
-     if !check_utxo_inputs(&results.0, &txid, esplora.clone()).await {    
+     if !check_utxo_inputs(&results.0, &txid).await {    
         return;
      }
 
@@ -993,7 +998,7 @@ pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, 
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
         for s in &results.0{
             let file_path = format!("./Json/UTXOS/{}.txt", s);
@@ -1016,7 +1021,7 @@ pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, 
            Err(_) => return, 
        };
 
-        let _ =  save_contract_scl01(&contract, payload, txid, false);
+        let _ =  save_contract(&contract, payload, txid, false);
    } else {
         let data = format!("{}:P-O-,{}", &contract.contractid,&new_owners.1.1);
         match fs::write(format!("./Json/UTXOS/{}.txt", &new_owners.1.0.clone()),data.clone(),){
@@ -1034,13 +1039,13 @@ pub async fn perform_drip_start_scl01(txid: &str, command: &str, payload: &str, 
    }
 }
 
-pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
+pub async fn perform_create_diminishing_airdrop(txid: &str, command: &str, payload: &str, pending: bool){
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1054,7 +1059,7 @@ pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str,
         Err(_) => return,
     };
 
-    if !check_utxo_inputs(&results.0, &txid, esplora.clone()).await {
+    if !check_utxo_inputs(&results.0, &txid).await {
         return;
     }
 
@@ -1068,7 +1073,7 @@ pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str,
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
         for s in &results.0{
             let file_path = format!("./Json/UTXOS/{}.txt", s);
@@ -1084,7 +1089,7 @@ pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str,
         }
 
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
    }else{
         let mut data = format!("{}:P-O-,{}", &contract.contractid,new_owners.1);
         if new_owners.2 {
@@ -1095,7 +1100,7 @@ pub async fn perform_create_diminishing_airdrop_scl01(txid: &str, command: &str,
    }
 }
 
-pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
+pub async fn perform_claim_diminishing_airdrop(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
@@ -1106,7 +1111,7 @@ pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, 
         Err(_) => return,
     };
 
-    let contract_pending = match read_contract_scl01(contract_id.as_str(), true) {
+    let contract_pending = match read_contract(contract_id.as_str(), true) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1165,7 +1170,7 @@ pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, 
                 None => HashMap::new(),
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1180,7 +1185,7 @@ pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, 
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
         let mut data = format!("{}:O-,{}", &contract.contractid,new_owners.1);
         if new_owners.2 {
@@ -1189,7 +1194,7 @@ pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, 
 
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
 
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
    }else{
         let mut data = format!("{}:P-C-,{}", &contract.contractid,new_owners.1);
         if new_owners.2 {
@@ -1200,13 +1205,13 @@ pub async fn perform_claim_diminishing_airdrop_scl01(txid: &str, command: &str, 
    }
 }
 
-pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
+pub async fn perform_create_dge(txid: &str, command: &str, payload: &str, pending: bool){
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1220,7 +1225,7 @@ pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, 
         Err(_) => return,
     };
 
-    if !check_utxo_inputs(&results.0, &txid, esplora.clone()).await {
+    if !check_utxo_inputs(&results.0, &txid).await {
      return;
     }
 
@@ -1245,7 +1250,7 @@ pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, 
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
 
     if !pending {
         for s in &results.0{
@@ -1262,7 +1267,7 @@ pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, 
         }
 
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
    }else{
         let mut data = format!("{}:P-O-,{}", &contract.contractid,new_owners.1);
         if new_owners.2 {
@@ -1272,13 +1277,13 @@ pub async fn perform_create_dge_scl01(txid: &str, command: &str, payload: &str, 
    }
 }
 
-pub async fn perform_claim_dge_scl01(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
+pub async fn perform_claim_dge(txid: &str, command: &str, payload: &str, pending: bool, esplora: String){
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
 
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1372,20 +1377,20 @@ pub async fn perform_claim_dge_scl01(txid: &str, command: &str, payload: &str, p
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, txid, true);
+    let _ = save_contract(&contract, payload, txid, true);
     if !pending {
         let data = format!("{}:DO-,{}", &contract.contractid,new_owners.1);
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
 
-        let _ = save_contract_scl01(&contract, payload, txid, false);
+        let _ = save_contract(&contract, payload, txid, false);
    }else{
         let data = format!("{}:P-DO-,{}", &contract.contractid,new_owners.1);
         write_to_file(format!("./Json/UTXOS/{}.txt", &new_owners.0),data.clone());
    }
 }
 
-pub fn perform_drips_scl01(contract_id: String, block_height: u64, pending: bool){
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+pub fn perform_drips(contract_id: String, block_height: u64, pending: bool){
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return
     };
@@ -1399,7 +1404,7 @@ pub fn perform_drips_scl01(contract_id: String, block_height: u64, pending: bool
         return;
     }
 
-    let _ = save_contract_scl01(&contract, "", "", true);
+    let _ = save_contract(&contract, "", "", true);
 
     if !pending {
         for (key,value,drip) in new_owners.clone(){
@@ -1414,7 +1419,7 @@ pub fn perform_drips_scl01(contract_id: String, block_height: u64, pending: bool
             };
         }
 
-        let _ = save_contract_scl01(&contract, "", "", false);
+        let _ = save_contract(&contract, "", "", false);
    } else {
         for (key,value,drip) in new_owners.clone(){
             let mut data = format!("{}:P-O-,{}", &contract.contractid,value);
@@ -1430,13 +1435,13 @@ pub fn perform_drips_scl01(contract_id: String, block_height: u64, pending: bool
    }
 }
 
-pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:bool, esplora: String) {
+pub async fn perform_listing_cancel(txid: &str, payload: &str, pending:bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
     
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1452,7 +1457,7 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
 
     let listing_utxo = replace_payload_special_characters(&words[1].to_string()); 
     let utxos: Vec<String>  = vec![listing_utxo.clone()];
-    if !check_utxo_inputs(&utxos, &txid, esplora.clone()).await {      
+    if !check_utxo_inputs(&utxos, &txid).await {      
         return;
     }
        
@@ -1468,9 +1473,9 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
         Err(_) => return,
     };
 
-    let _ = save_contract_scl01(&contract, payload, &txid, pending);
+    let _ = save_contract(&contract, payload, &txid, pending);
     if !pending {
-        let _ = save_contract_scl01(&contract, payload, &txid, false);
+        let _ = save_contract(&contract, payload, &txid, false);
         let data = format!("{}:O-,{}", &contract.contractid, owner.1);
         write_to_file(format!("./Json/UTXOS/{}.txt", &owner.0),data.clone());
         for s in &bids{
@@ -1486,13 +1491,13 @@ pub async fn perform_listing_cancel_scl01(txid: &str, payload: &str, pending:boo
     }
 }
 
-pub async fn perform_bid_cancel_scl01(txid: &str, payload: &str, pending:bool, esplora: String) {
+pub async fn perform_bid_cancel(txid: &str, payload: &str, pending:bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
         Err(_) => return,
     };
     
-    let mut contract = match read_contract_scl01(contract_id.as_str(), pending) {
+    let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
         Err(_) => return,
     };
@@ -1508,7 +1513,7 @@ pub async fn perform_bid_cancel_scl01(txid: &str, payload: &str, pending:bool, e
 
     let bidding_utxo = replace_payload_special_characters(&words[1].to_string());
     let utxos: Vec<String>  = vec![bidding_utxo.clone()];
-    if !check_utxo_inputs(&utxos, &txid, esplora.clone()).await {      
+    if !check_utxo_inputs(&utxos, &txid).await {      
         return;
     }
 
@@ -1524,9 +1529,9 @@ pub async fn perform_bid_cancel_scl01(txid: &str, payload: &str, pending:bool, e
             Err(_) => return,
     }
 
-    let _ = save_contract_scl01(&contract, payload, &txid, pending);
+    let _ = save_contract(&contract, payload, &txid, pending);
     if !pending {
-        let _ = save_contract_scl01(&contract, payload, &txid, false);
+        let _ = save_contract(&contract, payload, &txid, false);
     }
 }
 
@@ -1680,7 +1685,7 @@ pub fn handle_create_dge_payload(txid: &str, payload: &str)->Result<(Vec<String>
     return Ok((senders, pool, sats_rate, max_drop, drip_duration, address_split, change, single_drop));
 }
 
-pub fn read_contract_scl01(contract_id: &str, pending: bool) -> Result<SCL01Contract, String> {
+pub fn read_contract(contract_id: &str, pending: bool) -> Result<SCL01Contract, String> {
     let mut path = "./Json/Contracts/".to_string() +"/" + contract_id + "/state.txt";
     if pending  {
         path =  "./Json/Contracts/".to_string() +"/" + contract_id + "/pending.txt";
@@ -1697,7 +1702,7 @@ pub fn read_contract_scl01(contract_id: &str, pending: bool) -> Result<SCL01Cont
     }
 }
 
-pub fn save_contract_scl01(contract: &SCL01Contract, _payload: &str, _txid: &str, pending: bool) -> Result<String, String> {
+pub fn save_contract(contract: &SCL01Contract, _payload: &str, _txid: &str, pending: bool) -> Result<String, String> {
     let path: String;
     if !pending{
         path = format!("{}/{}/state.txt", "./Json/Contracts/", contract.contractid.to_string());
@@ -2137,4 +2142,698 @@ pub fn convert_old_contracts() {
               }
           }
       }
+}
+
+// Liquidity Pools
+pub fn perform_minting_scl04(txid: &str, payload: &str) {
+    match read_contract(txid, false) {
+        Ok(_) => return,
+        Err(_) => {},
+    };
+
+    let words: Vec<&str> = payload.split("SCL04:").collect();
+    if words.len() < 2{
+        println!("Invalid liquidity pool payload");
+        return;
+    }
+
+    let mint_split: Vec<&str> = words[1].split(",").collect();
+    if mint_split.len() < 5 {
+        println!("Invalid liquidity pool payload");
+        return
+    }
+
+    let ticker = replace_payload_special_characters(&mint_split[0].to_string());
+    let contract_id_1 = replace_payload_special_characters(&mint_split[1].to_string());
+    let contract_id_2 = replace_payload_special_characters(&mint_split[2].to_string());
+    let ratio_split = replace_payload_special_characters(&mint_split[3].to_string());
+    let fee_split = replace_payload_special_characters(&mint_split[4].to_string());
+
+    // Parse strings to numeric types
+    let ratio = match ratio_split.parse::<f32>(){
+        Ok(ratio) => ratio,
+        Err(_) => {
+            println!("Not mint valid payload");
+            return;
+        },
+    };
+
+    let fee = match fee_split.parse::<f32>(){
+        Ok(fee) => fee,
+        Err(_) => {
+            println!("Not mint valid payload");
+            return;
+        },
+    };
+
+    if contract_id_1 == contract_id_2{
+        return;
+    }
+
+    let contract_1 = match read_contract(&contract_id_1, false) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let contract_2 = match read_contract(&contract_id_2, false) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if contract_1.decimals != contract_2.decimals {
+        return;
+    }
+    
+    let mut payloads: HashMap<String,String> = HashMap::new();
+    payloads.insert(txid.to_string(), payload.to_string());
+    let pools: LiquidityPool = LiquidityPool{
+        contract_id_1: contract_id_1,
+        contract_id_2: contract_id_2,
+        pool_1: 0,
+        pool_2: 0,
+        fee: fee,
+        k: 0,
+        liquidity_ratio: ratio,
+        swaps: HashMap::new(),
+        liquidations: HashMap::new()
+    };
+
+    let new_contract = SCL01Contract {
+        ticker: ticker,
+        contractid: txid.to_string(),
+        supply: 0,
+        decimals: contract_1.decimals,
+        owners: HashMap::new(),
+        payloads: payloads,
+        listings: None,
+        bids: None,
+        fulfillments: None,
+        drips: None,
+        diminishing_airdrops: None,
+        dges: None,
+        airdrop_amount: None,
+        current_airdrops: None,
+        total_airdrops: None,
+        pending_claims: None,
+        last_airdrop_split: None,
+        right_to_mint: None,
+        max_supply: None,
+        liquidated_tokens: None,
+        liquidity_pool: Some(pools),
+    };
+
+    match serde_json::to_string(&new_contract) {
+        Ok(s) => {
+                write_contract_directory( format!("./Json/Contracts/{}/state.txt", &new_contract.contractid), s.clone(),new_contract.contractid.as_str());
+                write_contract_directory(format!("./Json/Contracts/{}/pending.txt", &new_contract.contractid),  s.clone(), new_contract.contractid.as_str());
+                let path =  "./Json/Contracts/".to_string() +"/" + &new_contract.contractid + "/header.txt";
+                let config = match read_server_config(){
+                    Ok(config) => config,
+                    Err(_) => Config::default(),
+                };
+            
+                let url = match config.url{
+                    Some(url) => url,
+                    None => "https://scl.darkfusion.tech/".to_owned(),
+                };
+
+                let import = ContractImport{
+                    contract_id: new_contract.contractid.clone(),
+                    ticker: new_contract.ticker,
+                    rest_url: url.to_string(),
+                    contract_type: "SCL04".to_string(),
+                    decimals: new_contract.decimals
+                };
+
+                let result = match serde_json::to_string(&import){
+                    Ok(result) =>  result,
+                    Err(_) => return, 
+                };
+
+                write_to_file(path, result);
+
+                let mut lookup = match read_server_lookup(){
+                    Ok(lookup) => lookup,
+                    Err(_) => Lookups::default(),
+                };
+                
+                lookup.lps.push(new_contract.contractid);
+                let _ = save_server_lookup(lookup);
+        }
+        Err(_) => {}
+    };
+}
+
+pub async fn perform_provide_liquidity(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let captures = match handle_provide_liquidity_payload_lp(&payload) {
+        Ok(captures) => captures,
+        Err(_) => {
+            println!("Failed to parse liquity provision payload");
+            return;
+        },
+    };
+
+    let lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let lp_pool = match lp_contract.liquidity_pool {
+        Some(lp_pool) => lp_pool,
+        None => return,
+    };
+
+    let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let mut contract_1 = match read_contract(lp_pool.contract_id_1.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if contract_1.payloads.contains_key(txid){      
+        return;
+    }
+
+    let res_1 = match contract_1.provide_liquidity(&txid.to_string(), &payload.to_string(), &input_utxos, captures, block_height as u64, true) {
+        Ok(res) => res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let mut contract_2 = match read_contract(lp_pool.contract_id_2.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if contract_2.payloads.contains_key(txid){      
+        return;
+    }
+
+    let res_2 = match contract_2.provide_liquidity(&txid.to_string(), &payload.to_string(), &input_utxos, captures, block_height as u64, false) {
+        Ok(res) => res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let _ =  save_contract(&contract_1, payload, txid, pending);
+    let _ =  save_contract(&contract_2, payload, txid, pending);
+    save_check_utxo_file(&contract_2.contractid, &res_2.0, res_2.1, res_2.2, pending, "O");
+    save_check_utxo_file(&contract_1.contractid, &res_1.0, res_1.1, res_1.2, pending, "O");
+    if ! pending {
+        let _ =  save_contract(&contract_1, payload, txid, true);
+        let _ =  save_contract(&contract_2, payload, txid, true);
+        for utxo in input_utxos{
+            let file_path = format!("./Json/UTXOS/{}.txt", utxo);
+            // Attempt to remove the file
+            match fs::remove_file(file_path) {
+                Ok(_) => {},
+                Err(_) => {},
+            }
+        }
+    }
+}
+
+pub async fn perform_provide_liquidity_lp(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let mut lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if lp_contract.payloads.contains_key(txid){      
+        return;
+    }
+
+    let lp = match lp_contract.liquidity_pool.clone(){
+        Some(lp) => lp,
+        None => return,
+    };
+
+    let captures = match handle_provide_liquidity_payload_lp(&payload) {
+        Ok(captures) => captures,
+        Err(_) => {
+            println!("Failed to parse liquity provision payload");
+            return;
+        },
+    };
+
+    let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let mut contract_1 = match read_contract(&lp.contract_id_1, pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if !contract_1.payloads.contains_key(txid){     
+        match contract_1.provide_liquidity(&txid.to_string(), &payload.to_string(), &input_utxos, captures, block_height as u64, true) {
+            Ok(res) => res,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    }
+
+    let mut contract_2 = match read_contract(&lp.contract_id_2, pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if !contract_2.payloads.contains_key(txid){     
+        let amount:u64 = (captures as f64 * lp.liquidity_ratio as f64) as u64;
+        match contract_2.provide_liquidity(&txid.to_string(), &payload.to_string(), &input_utxos, amount, block_height as u64, false) {
+            Ok(res) => res,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    }
+
+    let lp_res = match lp_contract.provide_liquidity_lp(&txid.to_string(), &payload.to_string(), captures) {
+        Ok(lp_res) => lp_res,
+        Err(err) => {
+            println!("Failed to execute liquity provision: {}", err);
+            return;
+        },
+    };
+
+    let _ =  save_contract(&lp_contract, payload, txid, pending);
+    let mut balance_type = "O";
+    if pending {
+        balance_type = "U";
+    }
+
+    save_check_utxo_file(&lp_contract.contractid, &lp_res.0, lp_res.1, false, pending, balance_type);
+    if !pending {
+        let _ =  save_contract(&lp_contract, payload, txid, true);
+    }
+}
+
+pub async fn perform_swap(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let mut lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let liquidity_pool = match lp_contract.liquidity_pool.clone(){
+        Some(liquidity_pool) => liquidity_pool,
+        None => return,
+    };
+
+    let lp_captures = match handle_swap_payload_lp(&payload) {
+        Ok(captures) => captures,
+        Err(_) => return,
+    };
+
+    let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let reciever_contract_id;
+    let claimer_contract_id;
+    if lp_captures.0 {
+        reciever_contract_id = liquidity_pool.contract_id_2;
+        claimer_contract_id = liquidity_pool.contract_id_1;
+    }else{
+        reciever_contract_id = liquidity_pool.contract_id_1;
+        claimer_contract_id = liquidity_pool.contract_id_2;
+    }
+
+    let mut claimer_contract = match read_contract(claimer_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let mut reciever_contract = match read_contract(reciever_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let recieving_amount: u64;
+    if liquidity_pool.swaps.contains_key(txid){     
+        recieving_amount = liquidity_pool.swaps[txid].1;
+    }else{
+        recieving_amount = match lp_contract.swap_lp(&txid.to_string(), &payload.to_string(), claimer_contract_id, lp_captures.1, lp_captures.2, lp_captures.3) {
+            Ok(lp_res) => lp_res,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    } 
+
+    let mut reciever_res: (String, u64) = (String::new(), 0);
+    if !reciever_contract.payloads.contains_key(txid){      
+        reciever_res = match reciever_contract.swap_recieve(&txid.to_string(), &payload.to_string(), recieving_amount) {
+            Ok(res) => res,
+            Err(err) => {
+                println!("{}", err);
+                (String::new(), 0)
+            },
+        };
+    }
+
+    let mut claim_res: (String, u64, bool) = (String::new(), 0, false);
+    let mut swap_amount  = lp_captures.1;
+    if recieving_amount == 0 {
+        swap_amount = 0;
+    }
+    if !claimer_contract.payloads.contains_key(txid){    
+        claim_res = match claimer_contract.swap_claim(&txid.to_string(), &payload.to_string(), &input_utxos, swap_amount, block_height as u64) {
+            Ok(res) => res,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    }
+
+    let _ =  save_contract(&claimer_contract, payload, txid, pending);
+    let _ =  save_contract(&reciever_contract, payload, txid, pending);
+    let mut balance_type = "O";
+    if pending {
+        balance_type = "U";
+    }
+
+    save_check_utxo_file(&reciever_contract.contractid, &reciever_res.0, reciever_res.1, false, pending, balance_type);
+    save_check_utxo_file(&claimer_contract.contractid, &claim_res.0, claim_res.1, claim_res.2, pending, balance_type);
+    if !pending {
+        let _ =  save_contract(&claimer_contract, payload, txid, true);
+        let _ =  save_contract(&reciever_contract, payload, txid, true);
+
+        for utxo in input_utxos{
+            let file_path = format!("./Json/UTXOS/{}.txt", utxo);
+            // Attempt to remove the file
+            match fs::remove_file(file_path) {
+                Ok(_) => {},
+                Err(_) => {},
+            }
+        }
+    }
+}
+
+pub async fn perform_swap_lp(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let mut lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if lp_contract.payloads.contains_key(txid){      
+        return;
+    }
+
+    let lp_pool = match lp_contract.liquidity_pool.clone() {
+        Some(lp_pool) => lp_pool,
+        None => return,
+    };
+
+    let lp_captures = match handle_swap_payload_lp(&payload) {
+        Ok(captures) => captures,
+        Err(_) => return,
+    };
+
+    let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let contract_id;
+    if lp_captures.0 {
+        contract_id = lp_pool.contract_id_1; 
+    }else{
+        contract_id = lp_pool.contract_id_2; 
+    }
+
+    let mut sender_contract = match read_contract(contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if sender_contract.payloads.contains_key(txid){      
+        return;
+    }
+
+    match sender_contract.swap_claim(&txid.to_string(), &payload.to_string(), &input_utxos, lp_captures.1, block_height as u64) {
+        Ok(res) => res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    _ = match lp_contract.swap_lp(&txid.to_string(), &payload.to_string(), contract_id, lp_captures.1, lp_captures.2, lp_captures.3) {
+        Ok(lp_res) => lp_res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    if ! pending {
+        let _ =  save_contract(&lp_contract, payload, txid, false);
+    } else {
+        let _ =  save_contract(&lp_contract, payload, txid, true);
+    }
+}
+
+pub async fn perform_liquidate_position(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let mut lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    let liquidity_pool = match lp_contract.liquidity_pool.clone(){
+        Some(liquidity_pool) => liquidity_pool,
+        None => return,
+    };
+
+    let lp_res: (u64, u64, String, u64, bool);
+    if !liquidity_pool.liquidations.contains_key(txid){
+        let captures = match handle_liquidatation_payload_lp(&payload) {
+            Ok(captures) => captures,
+            Err(_) => return,
+        };
+
+        let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+            Ok(inputs) => inputs,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    
+        lp_res = match lp_contract.liquidate_postion_lp(&txid.to_string(), &payload.to_string(), &input_utxos, captures, block_height as u64) {
+            Ok(lp_res) => lp_res,
+            Err(err) => {
+                println!("{}", err);
+                return;
+            },
+        };
+    }else{
+        lp_res = (liquidity_pool.liquidations[txid].0, liquidity_pool.liquidations[txid].1, format!("{}:0", txid), 0, false)
+    }
+
+    let mut contract_1 = match read_contract(liquidity_pool.contract_id_1.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if contract_1.payloads.contains_key(txid){      
+        return;
+    }
+
+    let res_1 = match contract_1.liquidate_position(&txid.to_string(), &payload.to_string(), lp_res.0, true) {
+        Ok(res) => res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let mut contract_2 = match read_contract(liquidity_pool.contract_id_2.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if contract_2.payloads.contains_key(txid){      
+        return;
+    }
+
+    let res_2 = match contract_2.liquidate_position(&txid.to_string(), &payload.to_string(), lp_res.1, false) {
+        Ok(res) => res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let _ =  save_contract(&contract_1, payload, txid, pending);
+    let _ =  save_contract(&contract_2, payload, txid, pending);
+    let mut balance_type = "O";
+    if pending {
+        balance_type = "U";
+    }
+    save_check_utxo_file(&contract_2.contractid, &res_2.0, res_2.1, res_2.2, pending, balance_type);
+    save_check_utxo_file(&contract_1.contractid, &res_1.0, res_1.1, res_1.2, pending, balance_type);
+    if ! pending {
+        let _ =  save_contract(&contract_1, payload, txid, true);
+        let _ =  save_contract(&contract_2, payload, txid, true);
+    }
+}
+
+pub async fn perform_liquidate_position_lp(txid: &str, payload: &str, pending: bool, lp_contract_id: &String, block_height: i32) {
+    let mut lp_contract = match read_contract(lp_contract_id.as_str(), pending) {
+        Ok(contract) => contract,
+        Err(_) => return,
+    };
+
+    if lp_contract.payloads.contains_key(txid){
+        return;
+    }
+
+    let captures = match handle_liquidatation_payload_lp(&payload) {
+        Ok(captures) => captures,
+        Err(_) => return,
+    };
+
+    let input_utxos: Vec<String> = match get_tx_inputs(txid).await {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let lp_res = match lp_contract.liquidate_postion_lp(&txid.to_string(), &payload.to_string(), &input_utxos, captures, block_height as u64) {
+        Ok(lp_res) => lp_res,
+        Err(err) => {
+            println!("{}", err);
+            return;
+        },
+    };
+
+    let _ =  save_contract(&lp_contract, payload, txid, pending);
+    save_check_utxo_file(&lp_contract.contractid, &lp_res.2, lp_res.3, lp_res.4, pending, "O");
+    if ! pending {
+        let _ =  save_contract(&lp_contract, payload, txid, true);
+        for utxo in input_utxos{
+            let file_path = format!("./Json/UTXOS/{}.txt", utxo);
+            // Attempt to remove the file
+            match fs::remove_file(file_path) {
+                Ok(_) => {},
+                Err(_) => {},
+            }
+        }
+    }
+}
+
+pub fn handle_provide_liquidity_payload_lp(payload: &str) -> Result<u64, String>{
+    let words: Vec<&str> = payload.split("PLP[").collect();
+    if words.len() < 2 {
+        return Err("Invalid liquidity pool payload".to_string());
+    }
+
+    let amount_split = replace_payload_special_characters(&words[1].to_string());
+
+    // Parse strings to numeric types
+    let amount = match amount_split.parse(){
+        Ok(amount) => amount,
+        Err(_) => return Err("Not mint valid payload".to_string()),
+    };
+    return Ok(amount);
+}
+
+pub fn handle_swap_payload_lp(payload: &str) -> Result<(bool, u64, u64, f32), String>{
+    let words: Vec<&str> = payload.split("SLP[").collect();
+    if words.len() < 2{
+        return Err("Invalid liquidity pool payload".to_string());
+    }
+
+    let swap_split: Vec<&str> = words[1].split(",").collect();
+    if swap_split.len() < 4{
+        return Err("Invalid liquidity pool payload".to_string());
+    }
+
+    let lp_contract: bool = swap_split[0].to_ascii_lowercase().contains("0");
+    let amount_split = replace_payload_special_characters(&swap_split[1].to_string());
+    let quoted_split = replace_payload_special_characters(&swap_split[2].to_string());
+    let tolerance_split = replace_payload_special_characters(&swap_split[3].to_string());
+
+    // Parse strings to numeric types
+    let amount = match amount_split.parse(){
+        Ok(amount) => amount,
+        Err(_) => return Err("Not valid payload".to_string()),
+    };
+
+    let quoted = match quoted_split.parse(){
+        Ok(quoted) => quoted,
+        Err(_) => return Err("Not valid payload".to_string()),
+    };
+
+    let tolerance = match tolerance_split.parse(){
+        Ok(tolerance) => tolerance,
+        Err(_) => return Err("Not valid payload".to_string()),
+    };
+
+    return Ok((lp_contract, amount, quoted, tolerance));
+}
+
+pub fn handle_liquidatation_payload_lp(payload: &str) -> Result<u64, String>{
+    let words: Vec<&str> = payload.split("LLP[").collect();
+    if words.len() < 2{
+        return Err("Invalid liquidate position payload".to_string());
+    }
+
+    let amount_split = replace_payload_special_characters(&words[1].to_string());
+
+    // Parse strings to numeric types
+    let amount = match amount_split.parse(){
+        Ok(amount) => amount,
+        Err(_) => return Err("Not mint valid payload".to_string()),
+    };
+    return Ok(amount);
+}
+
+pub fn save_check_utxo_file(contract_id: &String, utxo: &String, amount: u64, drip_present: bool, pending: bool, balance_type: &str){
+    if amount == 0 && !drip_present{
+        return;
+    }
+
+    let mut data= format!("{}:{}-,{}", &contract_id, balance_type, amount);
+    if pending {
+        data= format!("{}:P-{}-,{}", &contract_id, balance_type, amount);
+        if drip_present {
+            data = format!("{}:P-D{}-,{}", &contract_id, balance_type, amount);
+        }
+    }else if drip_present {
+        data = format!("{}:D{}-,{}", &contract_id, balance_type, amount);
+    }
+
+    match fs::write(format!("./Json/UTXOS/{}.txt", &utxo),data.clone()){
+        Ok(_) => {},
+        Err(_) => return,
+    };
 }

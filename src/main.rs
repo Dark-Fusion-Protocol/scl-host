@@ -1,23 +1,24 @@
 use chrono::{Local, NaiveDateTime};
 use crypto_hash::{hex_digest, Algorithm};
+use hex::FromHex;
+use magic_crypt::{new_magic_crypt, MagicCryptTrait};
 use reqwest::{header, Client};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fs;
 use std::path::Path;
 use tokio::time::{Duration, Instant};
 use warp::{reject, Filter, Rejection, Reply};
 extern crate regex;
-use std::env;
+use std::{env, fs};
 
 mod scl01{pub(crate) mod scl01_contract;pub(crate) mod scl01_utils;}
-use scl01::scl01_contract::{self, SCL01Contract};
-use crate::scl01::scl01_utils::{self, perform_minting_scl01, perform_transfer_scl01, perform_burn_scl01, perform_list_scl01, perform_bid_scl01, perform_accept_bid_scl01, perform_fulfil_bid_scl01,perform_drips_scl01, perform_airdrop, perform_airdrop_split, convert_old_contracts, save_contract_scl01, read_contract_scl01,handle_payload_extra_trade_info, perform_listing_cancel_scl01, perform_bid_cancel_scl01,perform_drip_start_scl01};
-use scl01::scl01_utils::{perform_create_diminishing_airdrop_scl01, perform_claim_diminishing_airdrop_scl01, perform_create_dge_scl01, perform_claim_dge_scl01, perform_minting_scl03, perform_rights_to_mint, perform_minting_scl02};
+use scl01::scl01_contract::{self};
+use crate::scl01::scl01_utils::{self, convert_old_contracts, save_contract, read_contract, handle_payload_extra_trade_info};
 
 mod utils;
-use utils::{check_txid_confirmed, check_utxo_spent, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, BidData, RelayedCommandStruct};
-use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData};
+use utils::{check_txid_confirmed, check_utxo_spent, dequeue_item, enqueue_item, extract_commands, extract_contract_id, get_contract_header, get_current_block_height, get_current_block_height_from_esplora, get_transaction, get_txid_from_hash, handle_get_request, read_contract_interactions, read_from_file, read_queue, read_server_config, read_server_lookup, remove_transaction, save_command_backup, save_contract_interactions, save_server_config, trim_chars, write_to_file, LiquidityPoolString};
+use utils::{CheckBalancesResult,CommandStruct, CustomError, ResultStruct,TxInfo, PendingCommandStruct, UtxoBalanceResult, UtxoBalances, BidPayload,Config,ContractSummary,TxidCheck,ContractHistoryEntry, ListingSummary, ContractListingResponse,TxidCheckResponse, TradeUtxoRequest, ContractTradeResponse,PagingMetaData,BidData, RelayedCommandStruct};
 
 static TXCOMMANDSPATH: &'static str = "./Json/Queues/Confirmed/";
 static PENDINGCOMMANDSPATH: &'static str = "./Json/Queues/Pending/";
@@ -33,8 +34,7 @@ async fn main() {
 
         if user_input == "convert" {
             convert_old_contracts();
-        }
-        else if user_input == "check_spent" {
+        } else if user_input == "check_spent" {
             remove_spent_utxos().await;
         }
     }
@@ -111,9 +111,9 @@ async fn main() {
         .and(warp::path("coin_drops"))
         .and_then(handle_coin_drop_request);
 
-    let get_meme_contracts = warp::get()
-        .and(warp::path("meme_mints"))
-        .and_then(handle_coin_drop_request);
+    let get_liquidity_contracts = warp::get()
+        .and(warp::path("liquidity_pools"))
+        .and_then(handle_liquidity_pool_request);
 
     // Check server directories and files
     if !fs::metadata("./Json").is_ok() {
@@ -140,9 +140,12 @@ async fn main() {
     if !fs::metadata("./Json/Queues/Claims").is_ok() {
         fs::create_dir("./Json/Queues/Claims").expect("Failed to create Claims directory");
     }
+    if !fs::metadata("./Json/TXs").is_ok() {
+        fs::create_dir("./Json/TXs").expect("Failed to create transaction lookup directory");
+    }
 
     if !fs::metadata(&"./Json/config.txt").is_ok() {
-        let c = Config{block_height:0,memes:Vec::new(),sorting:false,sort_again:false,reserved_tickers:None, hosts_ips: None, my_ip_split: Some(vec![127,0,0,1]), my_ip: None, key: None, esplora: Some("https://btc.darkfusion.tech/".to_owned()), url: Some("https://scl.darkfusion.tech/".to_string()) };
+        let c = Config{block_height:0,memes:Vec::new(),reserved_tickers:None, hosts_ips: None, my_ip_split: Some(vec![127,0,0,1]), my_ip: None, key: None, esplora: Some("https://btc.darkfusion.tech/".to_owned()), url: Some("https://scl.darkfusion.tech/".to_string()) };
         let _ = save_server_config(c);
     }
 
@@ -160,7 +163,7 @@ async fn main() {
         .or(get_coin_drops)
         .or(get_utxo_data)
         .or(get_contract_history)
-        .or(get_meme_contracts)
+        .or(get_liquidity_contracts)
         .or(check_all_summaries)
         .or(consolidate)
         .or(perform_relay)
@@ -173,7 +176,7 @@ async fn main() {
         );
 
     let mut pending_start_time = Instant::now();
-    let pending_target_duration = Duration::from_secs(5);
+    let pending_target_duration = Duration::from_secs(4);
     let _payload = tokio::spawn(async move {
         loop {
             let item_string = match dequeue_item(TXCOMMANDSPATH) {
@@ -197,7 +200,8 @@ async fn main() {
                 None => "https://btc.darkfusion.tech/".to_owned(),
             };
 
-            perform_commands(command.txid.as_str(), command.payload.as_str(), &command.bid_payload, false, &esplora).await;
+            perform_commands(command.txid.as_str(), command.payload.as_str(), &command.bid_payload, &command.contract_id, false, &esplora).await;
+            let _ = remove_transaction(command.txid.as_str());
         }
     });
 
@@ -226,147 +230,19 @@ async fn main() {
 
     if ip_split.len() < 4 {
         return
-    }     
+    }
 
     //Start the server on port 8080
     warp::serve(routes).run(([ip_split[0], ip_split[1], ip_split[2], ip_split[3]], 8080)).await;
 }
 
-async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
-    let config = match read_server_config(){
-        Ok(config) => config,
-        Err(_) => Config::default(),
-    };
-
-    let esplora = match config.esplora{
-        Some(esplora) => esplora,
-        None => "https://btc.darkfusion.tech/".to_owned(),
-    };
-
-    let url = format!("{}tx/{}",esplora, &req.txid);
-    let response = match handle_get_request(url).await {
-        Some(response) => response,
-        None => return Err(reject::custom(CustomError{ message : "Unable to check esplora".to_string()}))
-    };
-
-    let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
-        Ok(tx_info) => tx_info,
-        Err(_) => return Err(reject::custom(CustomError{ message : "Unable to deserialize txinfo".to_string()})),
-    };
-      let vout = match tx_info.vout {
-        Some(vout) => vout,
-        None => return Err(reject::custom(CustomError{ message : "INVALID OUTPUTS".to_string()})),
-    };
-
-    let mut op_return_flag = false;
-     for output in vout {
-        let scriptpubkey_type = match output.scriptpubkey_type {
-            Some(scriptpubkey_type) => scriptpubkey_type,
-            None => return Err(reject::custom(CustomError{ message : "INVALID SCRIPTPUBKEYTYPE".to_string()})),
-        };
-        if scriptpubkey_type == "op_return".to_string() {
-            op_return_flag = true;
-            break;
-        }
-    }
-    if op_return_flag {
-        return Err(reject::custom(CustomError{ message : "OP_RETURN FOUND, INVALID REBIND".to_string()}));
-    }
-
-    let vin = match tx_info.vin {
-        Some(vin) => vin,
-        None => return Err(reject::custom(CustomError{ message : "Unable to fetch inputs".to_string()})),
-    };
-       let status = match tx_info.status {
-            Some(status) => status,
-            None =>  return Err(reject::custom(CustomError{ message : "Unable to fetch tx status".to_string()})), 
-        };
-        let confirmed = match status.confirmed {
-            Some(confirmed) => confirmed,
-            None =>  return Err(reject::custom(CustomError{ message : "Unable to fetch tx status confirmed".to_string()})), 
-        };
-    if vin.len() == 0 {
-        return Err(reject::custom(CustomError{ message : "transaction has has no inputs".to_string()}));
-    }
-    let mut contract = match read_contract_scl01(&req.payload, false){
-        Ok(contract) => contract,
-        Err(_) =>  return Err(reject::custom(CustomError{ message : "unable to read contract".to_string()})),
-    };
-    let mut senders: Vec<String> = Vec::new();
-    for v in &vin {
-        let utxo = format!("{}:{}", v.txid.clone(), v.vout.clone());
-        senders.push(utxo);
-    }
-      let block_height = match get_current_block_height().await {
-            Ok(block_height) => block_height,
-            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to get block height".to_string()})),
-        };
-    let mut rec = Vec::new();
-    rec.push(format!("{}:0", &req.txid.clone())); 
-     let drip = match contract.consolidate(&req.txid.clone(), &"CONSOLIDATE".to_string(), &senders, &rec, block_height as u64) {
-        Ok(res) => res,
-        Err(_) => return Err(reject::custom(CustomError{ message : "Failed to consolidate".to_string()})),
-    };
-
-    match save_contract_scl01(&contract,  &"CONSOLIDATE".to_string(), &req.txid.clone(), true) {
-        Ok(_) => {},
-        Err(_) => {}
-    };
-    if confirmed {
-        for s in &senders{
-            let file_path = format!("./Json/UTXOS/{}.txt", s);
-            // Attempt to remove the file
-            match fs::remove_file(file_path) {
-                Ok(_) => {}
-                Err(_) => {} 
-            }
-        }
-
-        let mut data = format!("{}:O-,{}", &contract.contractid, drip.1.clone());
-        if drip.0 {
-           data= format!("{}:DO-,{}", &contract.contractid,drip.1); 
-        }
-
-        match fs::write(format!("./Json/UTXOS/{}:0.txt", &req.txid),data.clone(),){
-            Ok(_) => {},
-            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to write to file".to_string()})),
-        };
-        
-        let _ = save_contract_scl01(&contract, &"CONSOLIDATE".to_string(),  &req.txid, false);
-
-        let mut interactions =  match read_contract_interactions(&contract.contractid) {
-            Ok(interactions) => interactions,
-            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to read interactions".to_string()})),
-        };
-
-        interactions.total_transfers += 1;
-    
-        interactions.total_transfer_value += drip.1.clone();
-        match save_contract_interactions(&interactions, &contract.contractid) {
-            Ok(_) => interactions,
-            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to save interactions".to_string()})),
-        };
-    } else {
-             let mut data = format!("{}:O-,{}", &contract.contractid, drip.1.clone());
-            if drip.0 {
-                data= format!("{}:DO-,{}", &contract.contractid,drip.1); 
-            }
-             match fs::write(format!("./Json/UTXOS/{}:0.txt", &req.txid),data.clone(),){
-                Ok(_) => {},
-                Err(_) => return Err(reject::custom(CustomError{ message : "Failed to write utxo data".to_string()})), 
-            };
-    }
-    
-    let result = ResultStruct {
-        result: format!("Successfully rebound SCL assets").to_string(),
-    };
-
-    return Ok(warp::reply::json(&result));
-}
-
 // Warp post route functions
 async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Rejection> {
-    let res = payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await;
+    let res = match req.contract_id.clone() {
+        Some(contract_id) => payload_validation_and_confirmation_lp(req.txid.as_str(), &contract_id).await,
+        None => payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await,
+    };
+
     if !res.0 || !res.1 {     
         let current_date_time = Local::now();
         let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -375,6 +251,7 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
             payload: req.payload.clone(),
             time_added: formatted_date_time,
             bid_payload: req.bid_payload.clone(),
+            contract_id: req.contract_id.clone(),
         };
 
         let command_str = match serde_json::to_string(&pending_command) {
@@ -383,7 +260,7 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
         };
     
         let mut path = format!("{}{}-{}.txt", PENDINGCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), &req.txid);
-        if req.payload.contains("CLAIM_DIMAIRDROP") {
+        if req.payload.contains("CLAIM_DIMAIRDROP") ||  req.contract_id != None {
             path = format!("./Json/Queues/Claims/{}.txt", &req.txid);
         }
 
@@ -435,7 +312,8 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
         txid: req.txid,
         payload: req.payload,
         bid_payload: req.bid_payload,
-        key: key,
+        contract_id: req.contract_id,
+        key: key
     };
 
     let relay_command_str = match serde_json::to_string(&realy_command) {
@@ -478,9 +356,14 @@ async fn handle_relayed_command_request(req: RelayedCommandStruct) -> Result<imp
         txid: req.txid.clone(),
         payload: req.payload.clone(),
         bid_payload: req.bid_payload.clone(),
+        contract_id: req.contract_id.clone(),
     };
     
-    let res = payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await;
+    let res = match req.contract_id.clone() {
+        Some(contract_id) => payload_validation_and_confirmation_lp(req.txid.as_str(), &contract_id).await,
+        None => payload_validation_and_confirmation(req.txid.as_str(), req.payload.as_str()).await,
+    };
+
     if !res.0 || !res.1 {     
         let current_date_time = Local::now();
         let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -489,6 +372,7 @@ async fn handle_relayed_command_request(req: RelayedCommandStruct) -> Result<imp
             payload: req.payload.clone(),
             time_added: formatted_date_time,
             bid_payload: req.bid_payload.clone(),
+            contract_id: req.contract_id.clone()
         };
 
         let command_str = match serde_json::to_string(&pending_command) {
@@ -497,7 +381,7 @@ async fn handle_relayed_command_request(req: RelayedCommandStruct) -> Result<imp
         };
     
         let mut path = format!("{}{}-{}.txt", PENDINGCOMMANDSPATH, Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), &req.txid);
-        if req.payload.contains("CLAIM_DIMAIRDROP") {
+        if req.payload.contains("CLAIM_DIMAIRDROP") || req.contract_id != None{
             path = format!("./Json/Queues/Claims/{}.txt", &req.txid);
         }
 
@@ -598,7 +482,7 @@ async fn handle_check_utxo_files(data: UtxoBalances) -> Result<impl Reply, Rejec
             if balance_type.contains("D") {
                 balance_type = balance_type.replace("D", "");
                 let pending =  balance_type.contains("P");
-                let contract = match read_contract_scl01(contract_id, pending){
+                let contract = match read_contract(contract_id, pending){
                     Ok(contract) => contract,
                     Err(_) => continue,
                 };
@@ -647,6 +531,138 @@ async fn handle_check_utxo_files(data: UtxoBalances) -> Result<impl Reply, Rejec
     
     return Ok(warp::reply::json(&res));
 }   
+
+async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
+    let config = match read_server_config(){
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    let esplora = match config.esplora{
+        Some(esplora) => esplora,
+        None => "https://btc.darkfusion.tech/".to_owned(),
+    };
+
+    let url = format!("{}tx/{}",esplora, &req.txid);
+    let response = match handle_get_request(url).await {
+        Some(response) => response,
+        None => return Err(reject::custom(CustomError{ message : "Unable to check esplora".to_string()}))
+    };
+
+    let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
+        Ok(tx_info) => tx_info,
+        Err(_) => return Err(reject::custom(CustomError{ message : "Unable to deserialize txinfo".to_string()})),
+    };
+      let vout = match tx_info.vout {
+        Some(vout) => vout,
+        None => return Err(reject::custom(CustomError{ message : "INVALID OUTPUTS".to_string()})),
+    };
+
+    let mut op_return_flag = false;
+     for output in vout {
+        let scriptpubkey_type = match output.scriptpubkey_type {
+            Some(scriptpubkey_type) => scriptpubkey_type,
+            None => return Err(reject::custom(CustomError{ message : "INVALID SCRIPTPUBKEYTYPE".to_string()})),
+        };
+        if scriptpubkey_type == "op_return".to_string() {
+            op_return_flag = true;
+            break;
+        }
+    }
+    if op_return_flag {
+        return Err(reject::custom(CustomError{ message : "OP_RETURN FOUND, INVALID REBIND".to_string()}));
+    }
+
+    let vin = match tx_info.vin {
+        Some(vin) => vin,
+        None => return Err(reject::custom(CustomError{ message : "Unable to fetch inputs".to_string()})),
+    };
+       let status = match tx_info.status {
+            Some(status) => status,
+            None =>  return Err(reject::custom(CustomError{ message : "Unable to fetch tx status".to_string()})), 
+        };
+        let confirmed = match status.confirmed {
+            Some(confirmed) => confirmed,
+            None =>  return Err(reject::custom(CustomError{ message : "Unable to fetch tx status confirmed".to_string()})), 
+        };
+    if vin.len() == 0 {
+        return Err(reject::custom(CustomError{ message : "transaction has has no inputs".to_string()}));
+    }
+    let mut contract = match read_contract(&req.payload, false){
+        Ok(contract) => contract,
+        Err(_) =>  return Err(reject::custom(CustomError{ message : "unable to read contract".to_string()})),
+    };
+    let mut senders: Vec<String> = Vec::new();
+    for v in &vin {
+        let utxo = format!("{}:{}", v.txid.clone(), v.vout.clone());
+        senders.push(utxo);
+    }
+      let block_height = match get_current_block_height_from_esplora().await {
+            Ok(block_height) => block_height,
+            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to get block height".to_string()})),
+        };
+    let mut rec = Vec::new();
+    rec.push(format!("{}:0", &req.txid.clone())); 
+     let drip = match contract.consolidate(&req.txid.clone(), &"CONSOLIDATE".to_string(), &senders, &rec, block_height as u64) {
+        Ok(res) => res,
+        Err(_) => return Err(reject::custom(CustomError{ message : "Failed to consolidate".to_string()})),
+    };
+
+    match save_contract(&contract,  &"CONSOLIDATE".to_string(), &req.txid.clone(), true) {
+        Ok(_) => {},
+        Err(_) => {}
+    };
+    if confirmed {
+        for s in &senders{
+            let file_path = format!("./Json/UTXOS/{}.txt", s);
+            // Attempt to remove the file
+            match fs::remove_file(file_path) {
+                Ok(_) => {}
+                Err(_) => {} 
+            }
+        }
+
+        let mut data = format!("{}:O-,{}", &contract.contractid, drip.1.clone());
+        if drip.0 {
+           data= format!("{}:DO-,{}", &contract.contractid,drip.1); 
+        }
+
+        match fs::write(format!("./Json/UTXOS/{}:0.txt", &req.txid),data.clone(),){
+            Ok(_) => {},
+            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to write to file".to_string()})),
+        };
+        
+        let _ = save_contract(&contract, &"CONSOLIDATE".to_string(),  &req.txid, false);
+
+        let mut interactions =  match read_contract_interactions(&contract.contractid) {
+            Ok(interactions) => interactions,
+            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to read interactions".to_string()})),
+        };
+
+        interactions.total_transfers += 1;
+    
+        interactions.total_transfer_value += drip.1.clone();
+        match save_contract_interactions(&interactions, &contract.contractid) {
+            Ok(_) => interactions,
+            Err(_) => return Err(reject::custom(CustomError{ message : "Failed to save interactions".to_string()})),
+        };
+    } else {
+             let mut data = format!("{}:O-,{}", &contract.contractid, drip.1.clone());
+            if drip.0 {
+                data= format!("{}:DO-,{}", &contract.contractid,drip.1); 
+            }
+             match fs::write(format!("./Json/UTXOS/{}:0.txt", &req.txid),data.clone(),){
+                Ok(_) => {},
+                Err(_) => return Err(reject::custom(CustomError{ message : "Failed to write utxo data".to_string()})), 
+            };
+    }
+    
+    let result = ResultStruct {
+        result: format!("Successfully rebound SCL assets").to_string(),
+    };
+
+    return Ok(warp::reply::json(&result));
+}
 
 async fn handle_check_all_contract_summaries_request() -> Result<impl Reply, Rejection> {
     let mut results = "[".to_string();
@@ -709,6 +725,75 @@ async fn handle_coin_drop_request() -> Result<impl Reply, Rejection> {
             }
             Err(_) => continue,
         }
+    }
+
+    results.push_str("]");
+    return Ok(warp::reply::html(results));
+}
+
+async fn handle_liquidity_pool_request() -> Result<impl Reply, Rejection> {
+    let mut results = "[".to_string();
+    let contract_ids = match read_server_lookup(){
+        Ok(lookup) => lookup.lps,
+        Err(_) => Vec::new(),
+    };
+
+    for (index, contract_id) in contract_ids.iter().enumerate() {
+        if index > 0 && results.len() != 1 {
+            results.push_str(",");
+        }
+
+        results.push_str("{\"");
+        results.push_str(contract_id);
+        results.push_str("\":");
+
+        let contract = match read_contract(contract_id, false){
+            Ok(contract) => contract,
+            Err(_) => continue,
+        };
+
+        let liquidity_pool = match &contract.liquidity_pool {
+            Some(liquidity_pool) => liquidity_pool,
+            None => continue, 
+        };
+
+        let mut liquidity_pool_string = LiquidityPoolString::default();
+        liquidity_pool_string.contract_id_1 = liquidity_pool.contract_id_1.clone();
+        liquidity_pool_string.contract_id_2 = liquidity_pool.contract_id_2.clone();
+        liquidity_pool_string.pool_1 = liquidity_pool.pool_1.to_string();
+        liquidity_pool_string.pool_2 = liquidity_pool.pool_2.to_string();
+        liquidity_pool_string.fee = liquidity_pool.fee.to_string();
+        liquidity_pool_string.k = liquidity_pool.k.to_string();
+        liquidity_pool_string.liquidity_ratio = liquidity_pool.liquidity_ratio.to_string();
+        liquidity_pool_string.swaps = liquidity_pool.swaps.clone();
+        liquidity_pool_string.liquidations = liquidity_pool.liquidations.clone();
+        match serde_json::to_string(&liquidity_pool_string) {
+            Ok(json_pool) => {
+                results.push_str(&json_pool);
+
+                results.push_str(",\"");
+                results.push_str(&liquidity_pool.contract_id_1);
+                results.push_str("\":");
+
+                match get_contract_field(&liquidity_pool.contract_id_1, &"summary".to_string(), false, 1) {
+                    Ok(result) => results.push_str(&result),
+                    Err(_) => continue,
+                }
+
+                results.push_str(",\"");
+                results.push_str(&liquidity_pool.contract_id_2);
+                results.push_str("\":");
+
+                match get_contract_field(&liquidity_pool.contract_id_2, &"summary".to_string(), false, 1) {
+                    Ok(result) => results.push_str(&result),
+                    Err(_) => continue,
+                }
+
+                
+                results.push_str("}");
+            },
+            Err(_) =>continue,
+        };
     }
 
     results.push_str("]");
@@ -897,7 +982,7 @@ async fn handle_get_utxo_data(contract_id: String, field: String, utxo:String) -
 async fn handle_get_tx_history(contract_id: String) -> Result<impl Reply, Rejection>{
     let mut entries: Vec<ContractHistoryEntry> = Vec::new();
     let payloads: HashMap<String,String>;
-    let contract = match read_contract_scl01(&contract_id, false){
+    let contract = match read_contract(&contract_id, false){
         Ok(contract) => contract,
         Err(_) => return Err(reject::custom(CustomError{ message : "Unable to read contract".to_string()})),
     };
@@ -931,34 +1016,63 @@ async fn handle_custom_rejection(err: Rejection) -> std::result::Result<impl Rep
 }
 
 //Server Queue Functions
-async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<BidPayload>>, pending: bool, esplora: &String){    
+async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<BidPayload>>, lp_contract_id: &Option<String>, pending: bool, esplora: &String){    
     let commands = match extract_commands(payload){
         Ok(commands) => commands,
-        Err(_) => return,  
+        Err(_) => Vec::new(),
     };
 
-    for command in commands {
-        let contract_id = match extract_contract_id(&command) {
-            Ok(contract_id) => contract_id,
-            Err(_) => continue,
+    if payload.contains("SLP[") || payload.contains("PLP[") || payload.contains("LLP["){
+        let contract_id = match lp_contract_id {
+            Some(contract_id) => contract_id,
+            None => return,
         };
 
+        let block_height = match get_current_block_height().await {
+            Ok(block_height) => block_height,
+            Err(_) => return,
+        };
+
+        if payload.contains("PLP") {
+            scl01_utils::perform_provide_liquidity(txid,&payload, pending, contract_id, block_height).await;
+            scl01_utils::perform_provide_liquidity_lp(txid,&payload, pending, contract_id, block_height).await;
+            return;
+        }else if payload.contains("SLP") {
+            scl01_utils::perform_swap_lp(txid, &payload, pending, contract_id, block_height).await;
+            scl01_utils::perform_swap(txid, &payload, pending, contract_id, block_height).await;
+            return;
+        }else if payload.contains("LLP") {
+            scl01_utils::perform_liquidate_position_lp(txid, &payload, pending, contract_id, block_height).await;
+            scl01_utils::perform_liquidate_position(txid, &payload, pending, contract_id, block_height).await;
+            return;
+        }
+    }
+
+    for command in commands {
         if command.contains("SCL01") {
-            perform_minting_scl01(txid, &payload);
+            scl01_utils::perform_minting_scl01(txid, &payload);
             return ;
         }else if command.contains("SCL02") {
-            perform_minting_scl02(txid, &payload);
+            scl01_utils::perform_minting_scl02(txid, &payload);
             return;
         }else if command.contains("SCL03") {
-            perform_minting_scl03(txid, &payload);
+            scl01_utils::perform_minting_scl03(txid, &payload);
+            return;
+        }else if command.contains("SCL04") {
+            scl01_utils::perform_minting_scl04(txid, &payload);
             return;
         }else if command.contains("TRANSFER"){
-            perform_transfer_scl01(txid, &command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_transfer(txid, &command, &payload, pending).await;
         }else if command.contains("BURN"){
-            perform_burn_scl01(&txid, &command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_burn(&txid, &command, &payload, pending).await;
         }else if command.contains(":LIST"){
-            perform_list_scl01(&txid, &command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_list(&txid, &command, &payload, pending).await;
         }else if command.contains(":BID"){
+            let contract_id = match extract_contract_id(&command) {
+                Ok(contract_id) => contract_id,
+                Err(_) => continue,
+            };
+
             let payloads = match bid_payloads {
                 Some(payloads) => payloads,
                 None => continue,
@@ -966,32 +1080,32 @@ async fn perform_commands(txid: &str, payload: &str, bid_payloads: &Option<Vec<B
 
             for bid_payload in payloads{
                 if contract_id == bid_payload.contract_id {
-                    perform_bid_scl01(&txid, &command, &payload, &bid_payload.trade_txs, pending).await;
+                    scl01_utils::perform_bid(&txid, &command, &payload, &bid_payload.trade_txs, pending).await;
                     break;
                 }
             }
         }else if command.contains("ACCEPT_BID"){
-            perform_accept_bid_scl01(&txid, &command, pending, esplora.to_string()).await;
+            scl01_utils::perform_accept_bid(&txid, &command, pending).await;
         }else if command.contains("FULFIL_TRADE"){ 
-            perform_fulfil_bid_scl01(&txid, &command, pending).await;
+            scl01_utils::perform_fulfil_bid(&txid, &command, pending).await;
         }else if payload.contains("CANCELLISTING"){
-            perform_listing_cancel_scl01(txid, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_listing_cancel(txid, &payload, pending).await;
         }else if payload.contains("CANCELBID"){
-            perform_bid_cancel_scl01(txid, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_bid_cancel(txid, &payload, pending).await;
         }else if command.contains("DRIP"){
-            perform_drip_start_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_drip_start(txid,&command, &payload, pending).await;
         }else if command.contains(":DIMAIRDROP"){
-            perform_create_diminishing_airdrop_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_create_diminishing_airdrop(txid,&command, &payload, pending).await;
         }else if command.contains("CLAIM_DIMAIRDROP"){
-            perform_claim_diminishing_airdrop_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_claim_diminishing_airdrop(txid,&command, &payload, pending, esplora.to_string()).await;
         }else if command.contains(":DGE"){
-            perform_create_dge_scl01(txid,&command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_create_dge(txid,&command, &payload, pending).await;
         }else if command.contains("CLAIM_DGE"){
-            perform_claim_dge_scl01(txid, &command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_claim_dge(txid, &command, &payload, pending, esplora.to_string()).await;
         }else if command.contains("AIRDROP"){
-            perform_airdrop(txid, &command, &payload, pending);
+            scl01_utils::perform_airdrop(txid, &command, &payload, pending);
         }else if command.contains("RIGHTTOMINT"){
-            perform_rights_to_mint(txid,&command, &payload, pending, esplora.to_string()).await;
+            scl01_utils::perform_rights_to_mint(txid,&command, &payload, pending).await;
         }
     }
 }
@@ -1002,7 +1116,7 @@ async fn great_sort(){
         Err(_) => Vec::new(),
     };
 
-    let claim_queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
+    let sorting_queue: Vec<(PendingCommandStruct, String)> = match read_queue("./Json/Queues/Claims/".to_string()){
         Ok(queue) => queue,
         Err(_) => Vec::new(),
     };
@@ -1019,10 +1133,60 @@ async fn great_sort(){
 
     _ = perform_contracts_checks().await;
 
-    if claim_queue.len() > 0 {
+    if pending_queue.len() > 0 {
+        pending_queue.sort_by(|(_, string_a), (_, string_b)| string_a.cmp(string_b));
+        for command in pending_queue{
+            let res = match command.0.contract_id.clone() {
+                Some(contract_id) => payload_validation_and_confirmation_lp(command.0.txid.as_str(), &contract_id).await,
+                None => payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await,
+            };
+    
+            let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
+                Ok(command_date) => command_date,
+                Err(_) => continue,
+            };
+    
+            let duration = Local::now().naive_local() - command_date;
+            let two_mins = chrono::Duration::minutes(2);
+            if res.0 == false {
+                if duration > two_mins {
+                    let path_from_string: &Path = Path::new(&command.1);
+                    if path_from_string.is_file() {
+                         let _res = fs::remove_file(&path_from_string);
+                    }
+                }
+    
+                continue;
+            }
+    
+            if !res.1 {
+                let twenty_four_hours = chrono::Duration::hours(24);
+                if duration >= twenty_four_hours {
+                    //continue;
+                }
+                
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, &command.0.contract_id, true, &esplora).await;
+            }else{
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, &command.0.contract_id, false, &esplora).await;
+                let path_from_string: &Path = Path::new(&command.1);
+                if path_from_string.is_file() {
+                     let _ = fs::remove_file(&path_from_string);
+                }
+    
+                let _ = remove_transaction(command.0.txid.as_str());
+            }
+        }
+        
+    }
+
+    if sorting_queue.len() > 0 {
         let mut claims: Vec<(PendingCommandStruct, String, bool, bool, u64)> = Vec::new();
-        for command in claim_queue{
-            let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
+        for command in sorting_queue{
+            let res = match command.0.contract_id.clone() {
+                Some(contract_id) => payload_validation_and_confirmation_lp(command.0.txid.as_str(), &contract_id).await,
+                None => payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await,
+            };
+
             let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
                 Ok(command_date) => command_date,
                 Err(_) => continue,
@@ -1044,8 +1208,7 @@ async fn great_sort(){
             claims.push((command.0, command.1, res.0 ,res.1, res.2));
         }
     
-        claims.sort_by(|(_, _,_, _, amount_1), (_, _,_, _, amount_2)| amount_2.cmp(amount_1));
-    
+        claims.sort_by(|(_, _,_, _, amount_1), (_, _,_, _, amount_2)| amount_2.cmp(amount_1));  
         for command in claims{
             let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
                 Ok(command_date) => command_date,
@@ -1065,142 +1228,145 @@ async fn great_sort(){
                 continue;
             }
     
-            if !command.3 {
-                let twenty_four_hours = chrono::Duration::hours(24);
-                if duration >= twenty_four_hours {
-                    continue;
-                }
-                
-                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true, &esplora).await;
+            if !command.3 {                
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, &command.0.contract_id, true, &esplora).await;
             }else{
-                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false, &esplora).await;
+                perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, &command.0.contract_id, false, &esplora).await;
                 let path_from_string: &Path = Path::new(&command.1);
                 if path_from_string.is_file() {
                      let _res = fs::remove_file(&path_from_string);
                 }
-            }
-        }
-    }
-
-    if pending_queue.len() == 0 {
-        return ;
-    }
-
-    pending_queue.sort_by(|(_, string_a), (_, string_b)| string_a.cmp(string_b));
-
-    for command in pending_queue{
-        let res = payload_validation_and_confirmation(command.0.txid.as_str(), command.0.payload.as_str()).await;
-        let command_date = match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S")  {
-            Ok(command_date) => command_date,
-            Err(_) => continue,
-        };
-
-        let duration = Local::now().naive_local() - command_date;
-        let two_mins = chrono::Duration::minutes(2);
-        if res.0 == false {
-            if duration > two_mins {
-                let path_from_string: &Path = Path::new(&command.1);
-                if path_from_string.is_file() {
-                     let _res = fs::remove_file(&path_from_string);
-                }
-            }
-
-            continue;
-        }
-
-        if !res.1 {
-            let twenty_four_hours = chrono::Duration::hours(24);
-            if duration >= twenty_four_hours {
-                continue;
-            }
-            
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, true, &esplora).await;
-        }else{
-            perform_commands(command.0.txid.as_str(), command.0.payload.as_str(), &command.0.bid_payload, false, &esplora).await;
-            let path_from_string: &Path = Path::new(&command.1);
-            if path_from_string.is_file() {
-                 let _res = fs::remove_file(&path_from_string);
+    
+                let _ = remove_transaction(command.0.txid.as_str());
             }
         }
     }
 }
 
 // Validation
-async fn payload_validation_and_confirmation(txid: &str, payload: &str) -> (bool, bool, u64) { 
-    let config = match read_server_config(){
-        Ok(config) => config,
-        Err(_) => Config::default(),
-    };
-
-    let esplora = match config.esplora{
-        Some(esplora) => esplora,
-        None => "https://btc.darkfusion.tech/".to_owned(),
-    };
-
-    let url = format!("{}tx/{}",esplora, txid);
-    let response = match handle_get_request(url).await {
-        Some(response) => response,
-        None => return (false, false, 0),
-    };
-
-    let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
-        Ok(tx_info) => tx_info,
-        Err(_) => return (false, false, 0),
-    };
-
+async fn payload_validation_and_confirmation(txid: &str, payload: &str) -> (bool, bool, u64, Vec<String>, Vec<utils::Vout>) { 
     let trim1 = trim_chars(&payload, "\r");
     let trim2 = trim_chars(&trim1, "\n");
     let payload_hash = hex_digest(Algorithm::SHA256, &trim2.as_bytes());
-    let vout = match tx_info.vout {
-        Some(vout) => vout,
-        None => return (false, false, 0),
+
+    let (tx_payload, confirmed, fee, vout, vin)= match handle_tx_info(&txid).await{
+        Ok(payload) => payload,
+        Err(_) =>  return(false, false, 0, Vec::new(), Vec::new()),
     };
 
+    if payload_hash != tx_payload {
+        return(false, false, 0, Vec::new(), Vec::new());
+    }
 
-    for output in vout {
+    return (true, confirmed, fee, vout, vin);
+}
+
+async fn payload_validation_and_confirmation_lp(txid: &str, contract_id: &String) -> (bool, bool, u64, Vec<String>, Vec<utils::Vout>) {
+    let (payload, confirmed, fee, vin, vout) = match handle_tx_info(&txid).await{
+        Ok(payload) => payload,
+        Err(_) =>  return(false, false, 0, Vec::new(), Vec::new()),
+    };
+
+    let mc = new_magic_crypt!(contract_id.to_string(), 64);
+    let bytes = match Vec::from_hex(payload.clone()){
+        Ok(vec) => vec,
+        Err(_) => Vec::new(),
+    };
+
+    let payload_bytes = match mc.decrypt_bytes_to_bytes(&bytes){
+        Ok(bytes) => bytes,
+        Err(_) => return(false, false, 0, Vec::new(), Vec::new()),
+    };
+
+    let payload: String = payload_bytes
+        .iter()
+        .map(|&byte| {byte as char})
+        .collect();
+
+    println!("Payload: {}", payload);
+    if !payload.contains("SLP[") && !payload.contains("PLP[") && !payload.contains("LLP["){
+        return(false, false, 0, Vec::new(), Vec::new());
+    }
+
+    return (true, confirmed, fee, vin, vout);
+}
+
+async fn handle_tx_info(txid: &str) -> Result<(String, bool, u64, Vec<String>, Vec<utils::Vout>), String> {
+    let tx_info: TxInfo = match get_transaction(txid, true).await {
+        Ok(tx_info) => tx_info,
+        Err(_) => return Err(String::new()),
+    };
+
+    let vout = match tx_info.vout {
+        Some(vout) => vout,
+        None => return Err(String::new()),
+    };
+
+    let vin = match tx_info.vin {
+        Some(vin) => vin,
+        None => Vec::new()
+    };
+    
+    let mut vin_input_str: Vec<String> = Vec::new();
+    for input in vin {
+        let c = format!("{}:{}", &input.txid, &input.vout);
+        vin_input_str.push(c);
+    }
+
+    let payload: String;
+    for output in vout.clone() {
         let scriptpubkey_type = match output.scriptpubkey_type {
             Some(scriptpubkey_type) => scriptpubkey_type,
-            None => return (false, false, 0),
+            None => return Err(String::new()),
         };
 
         if scriptpubkey_type == "op_return".to_string() {
             let scriptpubkey_asm = match output.scriptpubkey_asm {
                 Some(scriptpubkey_asm) => scriptpubkey_asm,
-                None => return (false, false, 0),
+                None => return Err(String::new()),
             };
 
-            let mut hash_check: String = scriptpubkey_asm;
-            let hash_check_index = match hash_check.find("OP_PUSHBYTES_32") {
+            let hash_check: String = scriptpubkey_asm;
+            let push_byte_length;
+            // Find the index of "OP_PUSHBYTES_" in the input string
+            if let Some(index) = hash_check.find("OP_PUSHBYTES_") {
+                // Move the index forward by the length of "OP_PUSHBYTES_" to get the start of the number
+                let start_index = index + "OP_PUSHBYTES_".len();
+                // Find the end index of the number
+                let end_index = hash_check[start_index..].find(' ').map(|pos| pos + start_index).unwrap_or(hash_check.len());
+                // Extract the number substring
+                push_byte_length = &hash_check[start_index..end_index];
+            }else{
+                return Err(String::new())
+            }
+
+            let op_hash_checkpush_str = format!("OP_PUSHBYTES_{} ",push_byte_length);
+            let hash_check_index = match hash_check.find(op_hash_checkpush_str.as_str()) {
                 Some(hash_check_index) => hash_check_index,
-                None => return (false, false, 0),
+                None => return Err(String::new()),
             };
 
-            hash_check = hash_check[hash_check_index + 16..].to_string();
-            if payload_hash == hash_check {
-                let status = match tx_info.status {
-                    Some(status) => status,
-                    None => return (false, false, 0),
-                };
-
-                let confirmed = match status.confirmed {
-                    Some(confirmed) => confirmed,
-                    None => return (false, false, 0),
-                };
-
-                let fee = match tx_info.fee {
-                    Some(fee) => fee,
-                    None => 0,
-                };
-
-                if !confirmed {
-                    return (true, false, fee);
-                } else {
-                    return (true, true, fee);
-                }
+            payload = hash_check[hash_check_index + op_hash_checkpush_str.len()..].to_string();
+            let status = match tx_info.status {
+                Some(status) => status,
+                None => return Err(String::new()),
             };
+        
+            let confirmed = match status.confirmed {
+                Some(confirmed) => confirmed,
+                None => return Err(String::new()),
+            };
+        
+            let fee = match tx_info.fee {
+                Some(fee) => fee,
+                None => 0,
+            };
+
+            return Ok((payload, confirmed, fee, vin_input_str, vout));
         }
     }
-    return (false, false, 0);
+
+    return Err(String::new());
 }
 
 async fn perform_contracts_checks() -> Result<String, String> {
@@ -1209,7 +1375,7 @@ async fn perform_contracts_checks() -> Result<String, String> {
         Err(_) => return Ok("Success".to_string()),
     };
 
-    let current_block = match get_current_block_height().await{
+    let current_block = match get_current_block_height_from_esplora().await{
         Ok(current_block) => current_block,
         Err(_) => return Err("Unable to get contract type".to_string())
     };
@@ -1223,65 +1389,227 @@ async fn perform_contracts_checks() -> Result<String, String> {
         let c = Config{
             block_height: current_block,
             memes: config.memes,
-            sorting: config.sorting,
-            sort_again: config.sort_again,
             reserved_tickers: config.reserved_tickers,
             hosts_ips: config.hosts_ips,
             my_ip_split: config.my_ip_split,
             my_ip: config.my_ip,
             key: config.key,
-            esplora: config.esplora,
+            esplora: config.esplora.clone(),
             url: config.url
         };
 
         let _ = save_server_config(c);
+        let esplora = match config.esplora{
+            Some(esplora) => esplora,
+            None => "https://btc.darkfusion.tech/".to_owned(),
+        };
+
+        // Check op returns in new block
+        let hash_url = esplora.to_string() + "blocks/tip/hash";
+        let hash_response = match handle_get_request(hash_url).await {
+            Some(response) => response,
+            None => "Unable to get block from esplora".to_string(),      
+        };
+    
+        let hash_info_url = esplora.to_string() + "block/" + &hash_response;
+        let hash_info_response = match handle_get_request(hash_info_url).await {
+            Some(response) => response,
+            None => "Unable to get block from esplora".to_string(),      
+        };
+    
+        if let Ok(json_value) = serde_json::from_str::<Value>(&hash_info_response){
+            let tx_count = match json_value["tx_count"].as_u64(){
+                Some(count) => count,
+                None => 0,
+            };
+        
+            let multiples_of_25: Vec<u64> = (0..=tx_count)
+            .filter(|&x| x % 25 == 0)
+            .collect();
+        
+            let mut handles = vec![];
+            let mut block_transactions: Vec<TxInfo> = Vec::new();
+            for index in multiples_of_25.clone() {
+                let url = esplora.to_string() +"block/" + hash_response.as_str() + "/txs/" + &index.to_string();
+                let handle = tokio::spawn(async move { handle_get_request(url).await }); // Use async move for closures
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                match handle.await {
+                    Ok(result) => {
+                        let result = match result {
+                            Some(status) => status,
+                            None => continue
+                        };
+                
+                        let tx_info: Vec<TxInfo> = match serde_json::from_str::<Vec<TxInfo>>(&result) {
+                            Ok(tx_info) => tx_info,
+                            Err(_) => Vec::new()
+                        };
+                
+                        block_transactions.extend(tx_info);
+                    },
+                    Err(_) => continue,
+                };
+            }
+        
+            let contract_ids = match read_server_lookup(){
+                Ok(lookup) => lookup.lps,
+                Err(_) => Vec::new(),
+            };
+            
+            for transaction in block_transactions {
+                let vout = match transaction.vout {
+                    Some(vout) => vout,
+                    None => continue,
+                };
+        
+                let txid: String  = match transaction.txid {
+                    Some(txid) => txid,
+                    None => continue,
+                };
+            
+                let mut encrypted_payload: String = String::new();
+                for output in vout {
+                    let scriptpubkey_type = match output.scriptpubkey_type {
+                        Some(scriptpubkey_type) => scriptpubkey_type,
+                        None => continue,
+                    };
+            
+                    if scriptpubkey_type == "op_return".to_string() {
+                        let scriptpubkey_asm = match output.scriptpubkey_asm {
+                            Some(scriptpubkey_asm) => scriptpubkey_asm,
+                            None => continue,
+                        };
+            
+                        let hash_check: String = scriptpubkey_asm;
+                        let push_byte_length;
+                        // Find the index of "OP_PUSHBYTES_" in the input string
+                        if let Some(index) = hash_check.find("OP_PUSHBYTES_") {
+                            // Move the index forward by the length of "OP_PUSHBYTES_" to get the start of the number
+                            let start_index = index + "OP_PUSHBYTES_".len();
+                            // Find the end index of the number
+                            let end_index = hash_check[start_index..].find(' ').map(|pos| pos + start_index).unwrap_or(hash_check.len());                   
+                            // Extract the number substring
+                            push_byte_length = &hash_check[start_index..end_index];
+                        }else{
+                            continue;
+                        }
+            
+                        let op_hash_checkpush_str = format!("OP_PUSHBYTES_{} ",push_byte_length);
+                        let hash_check_index = match hash_check.find(op_hash_checkpush_str.as_str()) {
+                            Some(hash_check_index) => hash_check_index,
+                            None => continue,
+                        };
+            
+                        encrypted_payload = hash_check[hash_check_index + op_hash_checkpush_str.len()..].to_string();
+                        break;
+                    }
+                }
+            
+                if encrypted_payload.len() == 0 {
+                    continue;
+                }
+            
+                let bytes = match Vec::from_hex(encrypted_payload.clone()){
+                    Ok(vec) => vec,
+                    Err(_) => Vec::new(),
+                };
+            
+                for contract_id in contract_ids.clone() {
+                    let mc = new_magic_crypt!(contract_id.to_string(), 64);
+                    let payload_bytes = match mc.decrypt_bytes_to_bytes(&bytes){
+                        Ok(bytes) => bytes,
+                        Err(_) => continue
+                    };
+        
+                    let payload: String = payload_bytes
+                        .iter()
+                        .map(|&byte| {byte as char })
+                        .collect();
+            
+                    if payload.contains("SLP[") || payload.contains("PLP[") || payload.contains("LLP["){
+                        let pending_command = PendingCommandStruct{
+                            txid: txid.clone(),
+                            payload: payload.clone(),
+                            bid_payload: None,
+                            contract_id: Some(contract_id.clone()),
+                            time_added: Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+                        };
+        
+                        let command = CommandStruct{
+                            txid: txid.clone(),
+                            payload: payload.clone(),
+                            bid_payload: None,
+                            contract_id: Some(contract_id.clone())
+                        };
+                
+                        let command_str = match serde_json::to_string(&pending_command) {
+                            Ok(command_str) => command_str,
+                            Err(_) => break,
+                        };
+        
+                        let _ = match enqueue_item(format!("{}{}-{}.txt", "./Json/Queues/Claims/", Local::now().format("%Y-%m-%d-%H-%M-%S").to_string(), txid), &command_str.to_string()){
+                            Ok(_) => {},
+                            Err(_) => break,
+                        };
+                
+                        save_command_backup(&command, false);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     for entry in entries {
-        // Reset pending contracts
         if let Ok(entry) = entry {
-            let pending_path = format!("{}/pending.txt", entry.path().to_string_lossy());
-            let path = format!("{}/state.txt", entry.path().to_string_lossy());
-            if !fs::metadata(&pending_path).is_ok() || !fs::metadata(&path).is_ok()  {
-                continue;
-            }
-
-            let state_str = match read_from_file(path) {
-                Some(state_str) => state_str,
-                None => continue,
-            };
-
-            write_to_file(pending_path, state_str);
-            let directory_name = entry
-                .path()
-                .file_name()
-                .and_then(|os_str| os_str.to_str())
-                .map(|s| s.to_string());
-            if config.block_height < current_block {
-                let contract_id = match directory_name {
-                    Some(contract_id) => contract_id,
-                    None => continue,
+            let _thread = tokio::spawn(async move {
+                let pending_path = format!("{}/pending.txt", entry.path().to_string_lossy());
+                let path = format!("{}/state.txt", entry.path().to_string_lossy());
+                if !fs::metadata(&pending_path).is_ok() || !fs::metadata(&path).is_ok()  {
+                    return;
+                }
+            
+                let state_str = match read_from_file(path) {
+                    Some(state_str) => state_str,
+                    None => return,
                 };
+            
+                write_to_file(pending_path, state_str);
+                if config.block_height < current_block {
+                    let directory_name = entry
+                        .path()
+                        .file_name()
+                        .and_then(|os_str| os_str.to_str())
+                        .map(|s| s.to_string());
 
-		        _ = perform_drips_scl01(contract_id.clone(), current_block as u64, false);
-                let contract = match read_contract_scl01(contract_id.as_str(), false) {
-                    Ok(contract) => contract,
-                    Err(_) => return Err("Failed to find contract".to_string())
-                };
-
-                if let Some(bids) = contract.bids.clone() {
-                    for (key, value) in bids  {
-                        match add_fulfillment_commands_to_queue(&value.accept_tx, &key, &contract_id).await{
-                            Ok(_) => {},
-                            Err(_) =>  continue, 
-                        };
+                    let contract_id = match directory_name {
+                        Some(contract_id) => contract_id,
+                        None => return,
+                    };
+            
+                    _ = scl01_utils::perform_drips(contract_id.clone(), current_block as u64, false);
+                    let contract = match read_contract(contract_id.as_str(), false) {
+                        Ok(contract) => contract,
+                        Err(_) => return
+                    };
+            
+                    if let Some(bids) = contract.bids.clone() {
+                        for (key, value) in bids  {
+                            match add_fulfillment_commands_to_queue(&value.accept_tx, &key, &contract_id).await{
+                                Ok(_) => {},
+                                Err(_) =>  return, 
+                            };
+                        }
+                    }
+            
+                    if let Some(_split) = contract.clone().last_airdrop_split {
+                        scl01_utils::perform_airdrop_split(contract)
                     }
                 }
-
-                if let Some(_split) = contract.clone().last_airdrop_split {
-                    perform_airdrop_split(contract)
-                }
-            }
+            });
         }
     }
 
@@ -1313,7 +1641,7 @@ fn get_contracts() -> Result<Vec<String>, String> {
 }
 
 fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut page: usize) -> Result<String,String>{
-    let contract = match read_contract_scl01(contract_id, pending){
+    let contract = match read_contract(contract_id, pending){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
@@ -1400,6 +1728,29 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
         
         "decimals" => {
             return Ok(format!("{{\"Decimals\":\"{}\"}}", contract.decimals.to_string()));
+        }
+
+        "liquidated_tokens" => {
+            let liquidated_tokens = match &contract.liquidated_tokens{
+                Some(liquidated_tokens) => liquidated_tokens,
+                None => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{{\"Liquidated_Tokens\":\"{}\"}}", liquidated_tokens));
+        }
+
+        "liquidity_pool" => {
+            let liquidity_pool = match &contract.liquidity_pool {
+                Some(liquidity_pool) => liquidity_pool,
+                None => return Ok("{}".to_string()), 
+            };
+
+            let result = match serde_json::to_string(&liquidity_pool){
+                Ok(result) =>  result,
+                Err(_) => return Ok("{}".to_string()), 
+            };
+
+            return Ok(format!("{}", result));
         }
         
         "listings" => {
@@ -1609,11 +1960,117 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
         }
         
         "summary" => {
-            let summary = match get_scl01_contract_summary(&contract){
-                Ok(summary) => summary,
-                Err(_) => return Err("Unable to get contract summary".to_string()),
+            let import = match get_contract_header(contract.contractid.clone().as_str()){
+                Ok(import) => import,
+                Err(_) => return Err("Unable to get contract header".to_string()),
             };
-            return Ok(format!("{}", summary));
+        
+            let listings = match &contract.listings.clone() {
+                Some(listings) => listings.to_owned(),
+                None => HashMap::new(),
+            };
+        
+            let bids = match contract.bids.clone() {
+                Some(bids) => bids,
+                None => HashMap::new(),
+            };
+        
+            match read_contract_interactions(&contract.contractid){
+                Ok(contract_interactions) => {
+                    let mut summary = ContractSummary::default();
+                    let mut total_list_val = 0;
+                    let mut total_bid_val: u64 = 0;
+                    let mut avg_fulfil_price = 0;
+                    let mut avg_list_price = 0;
+                    let mut total_fulfiled = 0;
+                    let mut total_listed = 0;
+                    let mut index = 0;
+                    let mut latest_fulfilled = 0;
+                    let mut latest_bid_value = 0;
+                    for fulfilment in &contract_interactions.fulfillment_summaries {
+                        total_list_val += fulfilment.listing_price * fulfilment.listing_amount;
+                        total_listed += fulfilment.listing_amount;
+           
+                       if index == &contract_interactions.fulfillment_summaries.len() - 1 {
+                            latest_fulfilled = fulfilment.bid_amount;
+                            latest_bid_value = fulfilment.bid_price * fulfilment.bid_amount;
+                       } else {
+                        total_bid_val += fulfilment.bid_price * fulfilment.bid_amount;
+                        total_fulfiled += fulfilment.bid_amount;
+                       }
+                        index += 1;
+                    }
+        
+                    if contract_interactions.fulfillment_summaries.len() > 1 && total_fulfiled != 0 && total_bid_val != 0{
+                        avg_fulfil_price = ((total_bid_val/total_fulfiled) + (latest_bid_value/latest_fulfilled))/2;
+                        avg_list_price = total_list_val/ total_listed; 
+                    } else if contract_interactions.fulfillment_summaries.len() == 1 {
+                         avg_fulfil_price = latest_bid_value/latest_fulfilled;
+                         avg_list_price = total_list_val/ total_listed; 
+                    }
+        
+                    let mut available_airdrops: Option<u64> = None;
+                    if import.contract_type.contains("SCL02") {
+                        let airdrop_amount = match contract.airdrop_amount  {
+                            Some(airdrop_amount) => airdrop_amount,
+                            None => 0,
+                        };
+        
+                        let total_airdrops = match contract.total_airdrops  {
+                            Some(total_airdrops) => total_airdrops,
+                            None => 0,
+                        };
+        
+                        let current_airdrops = match contract.current_airdrops  {
+                            Some(current_airdrops) => current_airdrops,
+                            None => 0,
+                        };
+                        
+                        if current_airdrops >= total_airdrops {
+                            available_airdrops = Some(0);
+                        }else {
+                            available_airdrops = Some(airdrop_amount * (total_airdrops - current_airdrops));
+                        }
+                    }
+        
+                    let mut ratio: Option<f32> = None; 
+                    let mut lp_contracts: Option<(String, String)> = None; 
+                    match contract.liquidity_pool.clone() {
+                        Some(lp) => {
+                            ratio = Some(lp.liquidity_ratio);
+                            lp_contracts = Some((lp.contract_id_1, lp.contract_id_2));
+                        },
+                        None => {},
+                    }
+        
+                    summary.contract_id = contract.contractid.clone();
+                    summary.max_supply = contract.max_supply;
+                    summary.ticker = contract.ticker.clone();
+                    summary.rest_url = import.rest_url;
+                    summary.contract_type = import.contract_type;
+                    summary.decimals = import.decimals;
+                    summary.supply = contract.supply;
+                    summary.total_owners = contract.owners.len() as u64;
+                    summary.average_listing_price = avg_list_price;
+                    summary.average_traded_price = avg_fulfil_price;
+                    summary.total_listed = total_listed;
+                    summary.total_traded = total_fulfiled;
+                    summary.total_burns = contract_interactions.total_burns;
+                    summary.contract_interactions = contract.payloads.len() as u64;
+                    summary.total_transfers = contract_interactions.total_transfer_value;
+                    summary.current_listings = listings.len() as u64;
+                    summary.current_bids = bids.len() as u64;
+                    summary.available_airdrops = available_airdrops;
+                    summary.airdrop_amount = contract.airdrop_amount;
+                    summary.lp_ratio = ratio;
+                    summary.lp_contracts = lp_contracts;
+                    match serde_json::to_string(&summary){
+                        Ok(parsed_data) => return Ok(parsed_data), 
+                        Err(_) => return Err("Failed to serialize contract summary".to_string())
+                    };            
+                },
+                Err(_) => return Err("Could not find contract interactions".to_string()),
+            };
         }
         
         "trades" => {
@@ -1643,7 +2100,7 @@ fn get_contract_field(contract_id: &String, field: &String, pending: bool, mut p
 }
 
 fn get_utxo_field(contract_id: &String, field: &String, utxo: String, pending: bool) -> Result<String,String>{
-    let contract = match read_contract_scl01(contract_id, pending){
+    let contract = match read_contract(contract_id, pending){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to get contract".to_string()),
     };
@@ -1852,7 +2309,7 @@ fn get_utxo_field(contract_id: &String, field: &String, utxo: String, pending: b
 
 fn get_listing_summaries(contract_id: &String, listing_utxos: Vec<String>, pending: bool)-> Result<Vec<ListingSummary>,String>{
     let mut summaries: Vec<ListingSummary> = Vec::new();
-        let contract = match read_contract_scl01(contract_id, pending){
+        let contract = match read_contract(contract_id, pending){
             Ok(contract) => contract,
             Err(_) => return Err("Unable to read contract".to_string()),
         };
@@ -1899,7 +2356,7 @@ fn get_listing_summaries(contract_id: &String, listing_utxos: Vec<String>, pendi
 
 fn get_trade_details_from_bid_utxo(contract_id: &String, bid_utxos: Vec<String>)-> Result<Vec<ContractTradeResponse> ,String>{
     let mut summaries: Vec<ContractTradeResponse> = Vec::new();
-    let mut contract = match read_contract_scl01(contract_id, false){
+    let mut contract = match read_contract(contract_id, false){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
@@ -1951,7 +2408,7 @@ fn get_trade_details_from_bid_utxo(contract_id: &String, bid_utxos: Vec<String>)
         return Ok (summaries);
     }
 
-    contract = match read_contract_scl01(contract_id, true){
+    contract = match read_contract(contract_id, true){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
@@ -2012,12 +2469,12 @@ fn check_txid_history(contract_id: &String, txids: &Vec<String>) -> Result<Vec<C
     let mut entries: Vec<ContractHistoryEntry> = Vec::new();
     let payloads: HashMap<String,String>;
     let pending_payloads: HashMap<String,String>;
-    let contract = match read_contract_scl01(contract_id, false){
+    let contract = match read_contract(contract_id, false){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
 
-    let pending_contract = match read_contract_scl01(contract_id, true){
+    let pending_contract = match read_contract(contract_id, true){
         Ok(contract) => contract,
         Err(_) => return Err("Unable to read contract".to_string()),
     };
@@ -2071,7 +2528,7 @@ fn extract_info_from_payload(txid: &String, payload: &String, contract_id: &Stri
         }
 
         if command.contains("AIRDROP"){
-            let contract = match read_contract_scl01(contract_id, false){
+            let contract = match read_contract(contract_id, false){
                 Ok(contract) => contract,
                 Err(_) => continue,
             };
@@ -2215,7 +2672,8 @@ fn add_command_to_queue(txid: &String, payload: &String, pending: bool) -> Resul
             txid: txid.clone() ,
             payload: payload.clone(),
             bid_payload: None,
-            time_added: formatted_date_time
+            time_added: formatted_date_time,
+            contract_id: None
         };
         
         let command_str = match serde_json::to_string(&pending_command) {
@@ -2232,6 +2690,7 @@ fn add_command_to_queue(txid: &String, payload: &String, pending: bool) -> Resul
             txid: txid.clone() ,
             payload: payload.clone(),
             bid_payload: None,
+            contract_id: None
         };
 
         let command_str = match serde_json::to_string(&command) {
@@ -2246,108 +2705,6 @@ fn add_command_to_queue(txid: &String, payload: &String, pending: bool) -> Resul
     }
 
     return  Ok("Successfully added payload to queue:".to_string());
-}
-
-fn get_scl01_contract_summary(contract: &SCL01Contract) -> Result<String, String> {
-    let import = match get_contract_header(contract.contractid.clone().as_str()){
-        Ok(import) => import,
-        Err(_) => return Err("Unable to get contract header".to_string()),
-    };
-
-    let listings = match &contract.listings.clone() {
-        Some(listings) => listings.to_owned(),
-        None => HashMap::new(),
-    };
-
-    let bids = match contract.bids.clone() {
-        Some(bids) => bids,
-        None => HashMap::new(),
-    };
-
-    match read_contract_interactions(&contract.contractid){
-        Ok(contract_interactions) => {
-            let mut summary = ContractSummary::default();
-            let mut total_list_val = 0;
-            let mut total_bid_val: u64 = 0;
-            let mut avg_fulfil_price = 0;
-            let mut avg_list_price = 0;
-            let mut total_fulfiled = 0;
-            let mut total_listed = 0;
-            let mut index = 0;
-            let mut latest_fulfilled = 0;
-            let mut latest_bid_value = 0;
-            for fulfilment in &contract_interactions.fulfillment_summaries {
-                total_list_val += fulfilment.listing_price * fulfilment.listing_amount;
-                total_listed += fulfilment.listing_amount;
-   
-               if index == &contract_interactions.fulfillment_summaries.len() - 1 {
-                    latest_fulfilled = fulfilment.bid_amount;
-                    latest_bid_value = fulfilment.bid_price * fulfilment.bid_amount;
-               } else {
-                total_bid_val += fulfilment.bid_price * fulfilment.bid_amount;
-                total_fulfiled += fulfilment.bid_amount;
-               }
-                index += 1;
-            }
-
-            if contract_interactions.fulfillment_summaries.len() > 1 && total_fulfiled != 0 && total_bid_val != 0{
-                avg_fulfil_price = ((total_bid_val/total_fulfiled) + (latest_bid_value/latest_fulfilled))/2;
-                avg_list_price = total_list_val/ total_listed; 
-            } else if contract_interactions.fulfillment_summaries.len() == 1 {
-                 avg_fulfil_price = latest_bid_value/latest_fulfilled;
-                 avg_list_price = total_list_val/ total_listed; 
-            }
-
-            let mut available_airdrops: Option<u64> = None;
-            if import.contract_type.contains("SCL02") {
-                let airdrop_amount = match contract.airdrop_amount  {
-                    Some(airdrop_amount) => airdrop_amount,
-                    None => 0,
-                };
-
-                let total_airdrops = match contract.total_airdrops  {
-                    Some(total_airdrops) => total_airdrops,
-                    None => 0,
-                };
-
-                let current_airdrops = match contract.current_airdrops  {
-                    Some(current_airdrops) => current_airdrops,
-                    None => 0,
-                };
-                
-		        if current_airdrops >= total_airdrops {
-		            available_airdrops = Some(0);
-		        }else {
-		            available_airdrops = Some(airdrop_amount * (total_airdrops - current_airdrops));
-		        }
-            }
-
-            summary.contract_id = contract.contractid.clone();
-            summary.max_supply = contract.max_supply;
-            summary.ticker = contract.ticker.clone();
-            summary.rest_url = import.rest_url;
-            summary.contract_type = import.contract_type;
-            summary.decimals = import.decimals;
-            summary.supply = contract.supply;
-            summary.total_owners = contract.owners.len() as u64;
-            summary.average_listing_price = avg_list_price;
-            summary.average_traded_price = avg_fulfil_price;
-            summary.total_listed = total_listed;
-            summary.total_traded = total_fulfiled;
-            summary.total_burns = contract_interactions.total_burns;
-            summary.contract_interactions = contract.payloads.len() as u64;
-            summary.total_transfers = contract_interactions.total_transfer_value;
-            summary.current_listings = listings.len() as u64;
-            summary.current_bids = bids.len() as u64;
-            summary.available_airdrops = available_airdrops;
-            summary.airdrop_amount = contract.airdrop_amount;
-            match serde_json::to_string(&summary){
-                Ok(parsed_data) => return Ok(parsed_data), 
-                Err(_) => return Err("Failed to serialize contract summary".to_string())
-            };            
-        },
-        Err(_) => return Err("Could not find contract interactions".to_string()),
-    }
 }
 
 fn contruct_pagination_metadata(data: String, current_page: usize, total_pages: usize, page_entries: usize, entries: usize) -> String{
@@ -2371,7 +2728,7 @@ async fn remove_spent_utxos(){
         Ok(config) => config,
         Err(_) => return,
     };
-    
+
     let esplora = match config.esplora{
         Some(esplora) => esplora,
         None => return,
@@ -2400,7 +2757,7 @@ async fn remove_spent_utxos(){
                 None => continue,
             };
 
-            let mut contract = match read_contract_scl01(&contract_id, false){
+            let mut contract = match read_contract(&contract_id, false){
                 Ok(contract) => contract,
                 Err(_) => continue,
             };
@@ -2425,7 +2782,7 @@ async fn remove_spent_utxos(){
                     Ok(spent) => spent,
                     Err(_) => continue
                 };
-               
+
                if spent {
                     if let Some((bid_key, _)) = fulfillments.iter().find(|&(_, v)| *v == key) {
                         let bid = match bids.get(bid_key) {
@@ -2438,7 +2795,7 @@ async fn remove_spent_utxos(){
                             Err(_) => continue
                         };
 
-                        
+
                         if bid_spent {
                             println!("Spent Listing Removed {} for {}", listing.list_utxo, contract_id);
                             listings.remove(&key);
@@ -2497,7 +2854,7 @@ async fn remove_spent_utxos(){
                     Ok(spent) => spent,
                     Err(_) => continue
                 };
-               
+
                 if spent {
                     println!("Spent Bid Removed {}", bid.reseved_utxo);
                     bids.remove(&key);
@@ -2512,7 +2869,7 @@ async fn remove_spent_utxos(){
             contract.listings = Some(listings);
             contract.bids = Some(bids);
             contract.fulfillments = Some(fulfillments);
-            let _ = save_contract_scl01(&contract, "", "", false);
+            let _ = save_contract(&contract, "", "", false);
 
         }
     }
