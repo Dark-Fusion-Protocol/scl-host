@@ -235,7 +235,7 @@ pub struct ContractSummary {
     pub airdrop_amount: Option<u64>,
     pub max_supply: Option<u64>,
     pub lp_contracts: Option<(String, String)>,
-    pub lp_ratio: Option<f32>,
+    pub lp_ratio: Option<f64>,
     pub token_data: Option<String>,
 }
 

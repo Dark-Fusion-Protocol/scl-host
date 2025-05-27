@@ -2447,7 +2447,7 @@ pub fn perform_minting_scl04(txid: &str, payload: &str) {
     let fee_split = replace_payload_special_characters(&mint_split[4].to_string());
 
     // Parse strings to numeric types
-    let ratio = match ratio_split.parse::<f32>() {
+    let ratio = match ratio_split.parse::<f64>() {
         Ok(ratio) => ratio,
         Err(_) => {
             println!("Not mint valid payload");
