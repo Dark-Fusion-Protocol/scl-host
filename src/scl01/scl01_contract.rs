@@ -1401,35 +1401,46 @@ impl SCL01Contract {
     }
 
     pub fn provide_liquidity_lp(
-        &mut self,
-        txid: &str,
-        payload: &str,
-        provided_amount: u64,
-    ) -> Result<(String, u64), String> {
-        let mut liquidity_pool = match self.liquidity_pool.clone() {
-            Some(liquidity_pool) => liquidity_pool,
-            None => return Err("provide_liquidity_lp: no liquidity pools".to_string()),
-        };
+    &mut self,
+    txid: &str,
+    payload: &str,
+    provided_amount: u64,
+) -> Result<(String, u64), String> {
+    let mut liquidity_pool = match self.liquidity_pool.clone() {
+        Some(pool) => pool,
+        None => return Err("provide_liquidity_lp: no liquidity pools".to_string()),
+    };
 
-        liquidity_pool.pool_1 += provided_amount;
-        let ratio_amount: u64 =
-            (provided_amount as f64 * liquidity_pool.liquidity_ratio as f64) as u64;
-        liquidity_pool.pool_2 += provided_amount;
-        self.supply += provided_amount + ratio_amount;
-        if (provided_amount / ratio_amount) as f32 != liquidity_pool.liquidity_ratio {
-            return Err(
-                "provide_liquidity_lp: liquidity not provided in the correct ratio".to_string(),
-            );
-        }
+    // Compute paired amount from ratio
+    let ratio = liquidity_pool.liquidity_ratio;
+    let paired_amount = (provided_amount as f64 * ratio) as u64;
 
-        let lp_utxo = format!("{}:0", txid);
-        self.owners
-            .insert(lp_utxo.to_string(), provided_amount + ratio_amount);
-        liquidity_pool.k = liquidity_pool.pool_1 as u128 * liquidity_pool.pool_2 as u128;
-        self.liquidity_pool = Some(liquidity_pool);
-        self.payloads.insert(txid.to_string(), payload.to_string());
-        return Ok((lp_utxo, provided_amount + ratio_amount));
+    // Validate ratio using float division
+    let actual_ratio = provided_amount as f64 / paired_amount as f64;
+    if (actual_ratio - 1.0 / ratio).abs() > 0.0001 {
+        return Err(format!(
+            "provide_liquidity_lp: incorrect ratio. Expected: {:.4}, Got: {:.4}",
+            1.0 / ratio,
+            actual_ratio
+        ));
     }
+
+    // Update pools
+    liquidity_pool.pool_1 += provided_amount;
+    liquidity_pool.pool_2 += paired_amount;
+    self.supply += provided_amount + paired_amount;
+
+    // Track ownership and state
+    let lp_utxo = format!("{}:0", txid);
+    self.owners
+        .insert(lp_utxo.clone(), provided_amount + paired_amount);
+    liquidity_pool.k = liquidity_pool.pool_1 as u128 * liquidity_pool.pool_2 as u128;
+    self.liquidity_pool = Some(liquidity_pool);
+    self.payloads.insert(txid.to_string(), payload.to_string());
+
+    Ok((lp_utxo, provided_amount + paired_amount))
+}
+
 
     pub fn swap_lp(
         &mut self,
@@ -1666,7 +1677,7 @@ pub struct LiquidityPool {
     pub pool_2: u64,
     pub fee: f32,
     pub k: u128,
-    pub liquidity_ratio: f32,
+    pub liquidity_ratio: f64,
     pub swaps: HashMap<String, (u64, u64)>,
     pub liquidations: HashMap<String, (u64, u64)>,
 }

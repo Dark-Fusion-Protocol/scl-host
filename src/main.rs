@@ -2544,7 +2544,7 @@ fn get_contract_field(
                         }
                     }
 
-                    let mut ratio: Option<f32> = None;
+                    let mut ratio: Option<f64> = None;
                     let mut lp_contracts: Option<(String, String)> = None;
                     match contract.liquidity_pool.clone() {
                         Some(lp) => {
