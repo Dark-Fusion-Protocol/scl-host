@@ -100,6 +100,12 @@ async fn main() {
         .and(warp::body::json())
         .and_then(handle_check_txid_request);
 
+
+    let transferdetails = warp::post()
+        .and(warp::path("transfer_details"))
+        .and(warp::body::json())
+        .and_then(handle_check_transfer_details_request);
+
     let get_contract_field = warp::get()
         .and(warp::path!(String / String))
         .and_then(handle_get_contract_field);
@@ -194,6 +200,7 @@ async fn main() {
         .or(check_all_summaries)
         .or(consolidate)
         .or(perform_relay)
+        .or(transferdetails)
         .recover(handle_custom_rejection)
         .with(
             warp::cors()
@@ -1112,7 +1119,6 @@ async fn handle_check_txid_request(mut data: TxidCheck) -> Result<impl Reply, Re
             Ok(result) => entry.entries.extend(result),
             Err(_) => continue,
         };
-
         results.push(entry);
     }
 
@@ -1142,6 +1148,70 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
         }
         Err(_) => Ok(warp::reply::html(format!("No Contracts"))),
     };
+}
+
+async fn handle_check_transfer_details_request(
+    txid: String,
+) -> Result<impl Reply, Rejection> {
+    // Scan all contracts for the txid in their payloads (confirmed and pending)
+    let contract_ids = match get_contracts() {
+        Ok(ids) => ids,
+        Err(_) => {
+            return Err(warp::reject::custom(CustomError {
+                message: "Unable to get contracts".to_string(),
+            }))
+        }
+    };
+
+    for contract_id in contract_ids {
+        for &pending in &[false, true] {
+            let contract = match read_contract(&contract_id, pending) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Some(payload) = contract.payloads.get(&txid) {
+                // Only interested in transfers
+                if !payload.contains("TRANSFER") {
+                    continue;
+                }
+                // Extract transfer info
+                let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
+                    match scl01_utils::handle_transfer_payload(&txid, payload) {
+                        Ok(res) => res,
+                        Err(_) => (Vec::new(), Vec::new(), String::new()),
+                    };
+                let mut total_amount = 0u64;
+                let mut recipient_list = Vec::new();
+                for (recipient, amount) in &recipients {
+                    total_amount += *amount;
+                    recipient_list.push(recipient.clone());
+                }
+                let sender = if !senders.is_empty() {
+                    senders.join(",")
+                } else {
+                    "".to_string()
+                };
+                let recipient = if !recipient_list.is_empty() {
+                    recipient_list.join(",")
+                } else {
+                    "".to_string()
+                };
+                // Compose response
+                let response = serde_json::json!({
+                    "contract_id": contract.contractid,
+                    "ticker": contract.ticker,
+                    "amount": total_amount,
+                    "sender": sender,
+                    "recipient": recipient,
+                });
+                return Ok(warp::reply::json(&response));
+            }
+        }
+    }
+
+    Err(warp::reject::custom(CustomError {
+        message: "Transfer not found".to_string(),
+    }))
 }
 
 async fn handle_get_contract_field(
