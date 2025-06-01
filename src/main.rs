@@ -101,9 +101,8 @@ async fn main() {
         .and_then(handle_check_txid_request);
 
 
-    let transferdetails = warp::post()
-        .and(warp::path("transfer_details"))
-        .and(warp::body::json())
+    let transferdetails = warp::get()
+        .and(warp::path!("transfer_details" / String))
         .and_then(handle_check_transfer_details_request);
 
     let get_contract_field = warp::get()
