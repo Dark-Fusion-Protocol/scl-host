@@ -1152,7 +1152,6 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
 async fn handle_check_transfer_details_request(
     txid: String,
 ) -> Result<impl Reply, Rejection> {
-    // Scan all contracts for the txid in their payloads (confirmed and pending)
     let contract_ids = match get_contracts() {
         Ok(ids) => ids,
         Err(_) => {
@@ -1169,39 +1168,75 @@ async fn handle_check_transfer_details_request(
                 Err(_) => continue,
             };
             if let Some(payload) = contract.payloads.get(&txid) {
-                // Only interested in transfers
                 if !payload.contains("TRANSFER") {
                     continue;
                 }
-                // Extract transfer info
                 let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
                     match scl01_utils::handle_transfer_payload(&txid, payload) {
                         Ok(res) => res,
                         Err(_) => (Vec::new(), Vec::new(), String::new()),
                     };
-                let mut total_amount = 0u64;
-                let mut recipient_list = Vec::new();
-                for (recipient, amount) in &recipients {
-                    total_amount += *amount;
-                    recipient_list.push(recipient.clone());
+
+                // Fetch addresses from Esplora for senders (vin) and recipients (vout)
+                let config = match read_server_config() {
+                    Ok(config) => config,
+                    Err(_) => Config::default(),
+                };
+                let esplora = config.esplora.unwrap_or("https://btc.darkfusion.tech/".to_owned());
+                let url = format!("{}tx/{}", esplora, txid);
+                let response = match handle_get_request(url.clone()).await {
+                    Some(response) => response,
+                    None => {
+                        return Err(warp::reject::custom(CustomError {
+                            message: "No response from esplora".to_string(),
+                        }))
+                    }
+                };
+                let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
+                    Ok(tx_info) => tx_info,
+                    Err(_) => {
+                        return Err(warp::reject::custom(CustomError {
+                            message: "No response from esplora".to_string(),
+                        }))
+                    }
+                };
+
+                // Collect sender addresses from vin
+                let mut sender_addresses = Vec::new();
+                if let Some(vin) = tx_info.vin {
+                    for input in vin {
+                        if let Some(addr) = input.prevout.as_ref().and_then(|p| p.scriptpubkey_address.clone()) {
+                            sender_addresses.push(addr);
+                        }
+                    }
                 }
-                let sender = if !senders.is_empty() {
-                    senders.join(",")
-                } else {
-                    "".to_string()
-                };
-                let recipient = if !recipient_list.is_empty() {
-                    recipient_list.join(",")
-                } else {
-                    "".to_string()
-                };
-                // Compose response
+
+                // Collect recipient addresses from vout
+                let mut recipient_addresses = Vec::new();
+                if let Some(vout) = tx_info.vout {
+                    for (recipient_utxo, _amount) in &recipients {
+                        // recipient_utxo is "txid:vout"
+                        let parts: Vec<&str> = recipient_utxo.split(':').collect();
+                        if parts.len() == 2 {
+                            if let Ok(vout_index) = parts[1].parse::<usize>() {
+                                if let Some(output) = vout.get(vout_index) {
+                                    if let Some(addr) = output.scriptpubkey_address.clone() {
+                                        recipient_addresses.push(addr);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let total_amount: u64 = recipients.iter().map(|(_, amount)| *amount).sum();
+
                 let response = serde_json::json!({
                     "contract_id": contract.contractid,
                     "ticker": contract.ticker,
                     "amount": total_amount,
-                    "sender": sender,
-                    "recipient": recipient,
+                    "senders": sender_addresses,
+                    "recipients": recipient_addresses,
                 });
                 return Ok(warp::reply::json(&response));
             }
