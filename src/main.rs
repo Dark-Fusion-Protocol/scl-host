@@ -1152,7 +1152,7 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
 async fn handle_check_transfer_details_request(
     txid: String,
 ) -> Result<impl Reply, Rejection> {    
-        println!("[DEBUG] /transfer_details/{} called", txid);
+    println!("[DEBUG] /transfer_details/{} called", txid);
     let contract_ids = match get_contracts() {
         Ok(ids) => ids,
         Err(_) => {
@@ -1186,67 +1186,35 @@ async fn handle_check_transfer_details_request(
                         },
                     };
 
-                // Fetch addresses from Esplora for senders (vin) and recipients (vout)
-                let config = match read_server_config() {
-                    Ok(config) => config,
-                    Err(_) => Config::default(),
-                };
-                let esplora = config.esplora.unwrap_or("https://btc.darkfusion.tech/".to_owned());
-                let url = format!("{}tx/{}", esplora, txid);
-                let response = match handle_get_request(url.clone()).await {
-                    Some(response) => response,
-                    None => {
-                        println!("[DEBUG] No response from esplora for txid={}", txid);
-                        return Err(warp::reject::custom(CustomError {
-                            message: "No response from esplora".to_string(),
-                        }))
-                    }
-                };
-                let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
-                    Ok(tx_info) => tx_info,
-                    Err(e) => {
-                        println!("[DEBUG] Failed to parse TxInfo for txid={}: {:?}", txid, e);
-                        return Err(warp::reject::custom(CustomError {
-                            message: "No response from esplora".to_string(),
-                        }))
-                    }
-                };
-
-                // Group senders: address -> total sent
+                // Group senders by address and sum SCL token amounts (if available)
                 use std::collections::HashMap;
                 let mut sender_map: HashMap<String, u64> = HashMap::new();
-                if let Some(vin) = tx_info.vin {
-                    for input in vin {
-                        if let (Some(addr), Some(value)) = (
-                            input.prevout.as_ref().and_then(|p| p.scriptpubkey_address.clone()),
-                            input.prevout.as_ref().and_then(|p| p.value)
-                        ) {
-                            *sender_map.entry(addr).or_insert(0) += value;
-                        }
-                    }
+                for sender in &senders {
+                    // If senders vector contains amounts, use them here. Otherwise, just count occurrences.
+                    *sender_map.entry(sender.clone()).or_insert(0) += 1;
                 }
-                let senders: Vec<_> = sender_map.into_iter().map(|(address, amount_sent)| serde_json::json!({"address": address, "amount_sent": amount_sent})).collect();
+                let senders_json: Vec<_> = sender_map.into_iter()
+                    .map(|(address, amount_sent)| serde_json::json!({"address": address, "amount_sent": amount_sent}))
+                    .collect();
 
-                // Group recipients: address -> total received
+                // Group recipients by address and sum SCL token amounts
                 let mut recipient_map: HashMap<String, u64> = HashMap::new();
-                if let Some(vout) = tx_info.vout {
-                    for output in vout {
-                        if let (Some(addr), Some(value)) = (output.scriptpubkey_address.clone(), output.value) {
-                            *recipient_map.entry(addr).or_insert(0) += value;
-                        }
-                    }
+                for (address, amount) in &recipients {
+                    *recipient_map.entry(address.clone()).or_insert(0) += *amount;
                 }
-                let recipients: Vec<_> = recipient_map.into_iter().map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received})).collect();
+                let recipients_json: Vec<_> = recipient_map.into_iter()
+                    .map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received}))
+                    .collect();
 
-                let total_amount: u64 = recipients.iter().map(|r| r["amount_received"].as_u64().unwrap_or(0)).sum();
+                let total_amount: u64 = recipients.iter().map(|(_, amount)| *amount).sum();
 
                 let status = if !pending { "confirmed" } else { "pending" };
                 let response = serde_json::json!({
                     "contract_id": contract.contractid,
                     "ticker": contract.ticker,
                     "amount": total_amount,
-                    "senders": senders,
-                    "recipients": recipients,
+                    "senders": senders_json,
+                    "recipients": recipients_json,
                     "status": status
                 });
                 println!("[DEBUG] Returning transfer details for txid={} contract_id={} status={}", txid, contract_id, status);
