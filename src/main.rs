@@ -1199,15 +1199,15 @@ async fn handle_check_transfer_details_request(
                 // Resolve UTXOs to addresses
                 let utxo_to_address = utils::get_addresses_for_utxos(utxo_list).await;
 
-                // Group senders by address and sum SCL token amounts (if available)
-                use std::collections::HashMap;
-                let mut sender_map: HashMap<String, u64> = HashMap::new();
+                // Group senders by address (do not sum amounts, just list unique addresses)
+                use std::collections::HashSet;
+                let mut sender_set: HashSet<String> = HashSet::new();
                 for sender in &senders {
                     let address = utxo_to_address.get(sender).cloned().unwrap_or(sender.clone());
-                    *sender_map.entry(address).or_insert(0) += 1;
+                    sender_set.insert(address);
                 }
-                let senders_json: Vec<_> = sender_map.into_iter()
-                    .map(|(address, amount_sent)| serde_json::json!({"address": address, "amount_sent": amount_sent}))
+                let senders_json: Vec<_> = sender_set.into_iter()
+                    .map(|address| serde_json::json!({"address": address}))
                     .collect();
 
                 // Group recipients by address and sum SCL token amounts
