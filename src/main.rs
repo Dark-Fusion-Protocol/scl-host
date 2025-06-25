@@ -1152,9 +1152,11 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
 async fn handle_check_transfer_details_request(
     txid: String,
 ) -> Result<impl Reply, Rejection> {
+    println!("[DEBUG] /transfer_details/{} called", txid);
     let contract_ids = match get_contracts() {
         Ok(ids) => ids,
         Err(_) => {
+            println!("[DEBUG] Unable to get contracts");
             return Err(warp::reject::custom(CustomError {
                 message: "Unable to get contracts".to_string(),
             }))
@@ -1165,16 +1167,23 @@ async fn handle_check_transfer_details_request(
         for &pending in &[false, true] {
             let contract = match read_contract(&contract_id, pending) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    println!("[DEBUG] Skipping contract_id={} pending={} due to error: {:?}", contract_id, pending, e);
+                    continue;
+                }
             };
             if let Some(payload) = contract.payloads.get(&txid) {
                 if !payload.contains("TRANSFER") {
+                    println!("[DEBUG] Found payload for txid={} in contract_id={}, but not a TRANSFER", txid, contract_id);
                     continue;
                 }
                 let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
                     match scl01_utils::handle_transfer_payload(&txid, payload) {
                         Ok(res) => res,
-                        Err(_) => (Vec::new(), Vec::new(), String::new()),
+                        Err(e) => {
+                            println!("[DEBUG] handle_transfer_payload error for txid={} contract_id={}: {:?}", txid, contract_id, e);
+                            (Vec::new(), Vec::new(), String::new())
+                        },
                     };
 
                 // Fetch addresses from Esplora for senders (vin) and recipients (vout)
@@ -1187,6 +1196,7 @@ async fn handle_check_transfer_details_request(
                 let response = match handle_get_request(url.clone()).await {
                     Some(response) => response,
                     None => {
+                        println!("[DEBUG] No response from esplora for txid={}", txid);
                         return Err(warp::reject::custom(CustomError {
                             message: "No response from esplora".to_string(),
                         }))
@@ -1194,7 +1204,8 @@ async fn handle_check_transfer_details_request(
                 };
                 let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
                     Ok(tx_info) => tx_info,
-                    Err(_) => {
+                    Err(e) => {
+                        println!("[DEBUG] Failed to parse TxInfo for txid={}: {:?}", txid, e);
                         return Err(warp::reject::custom(CustomError {
                             message: "No response from esplora".to_string(),
                         }))
@@ -1238,11 +1249,13 @@ async fn handle_check_transfer_details_request(
                     "senders": sender_addresses,
                     "recipients": recipient_addresses,
                 });
+                println!("[DEBUG] Returning transfer details for txid={} contract_id={}", txid, contract_id);
                 return Ok(warp::reply::json(&response));
             }
         }
     }
 
+    println!("[DEBUG] Transfer not found for txid={}", txid);
     Err(warp::reject::custom(CustomError {
         message: "Transfer not found".to_string(),
     }))
@@ -1676,18 +1689,6 @@ async fn great_sort() {
                 }
 
                 continue;
-            }
-
-            if !command.3 {
-                perform_commands(
-                    command.0.txid.as_str(),
-                    command.0.payload.as_str(),
-                    &command.0.bid_payload,
-                    &command.0.contract_id,
-                    true,
-                    &esplora,
-                )
-                .await;
             } else {
                 perform_commands(
                     command.0.txid.as_str(),
@@ -1884,7 +1885,6 @@ async fn perform_contracts_checks() -> Result<String, String> {
             Some(response) => response,
             None => "Unable to get block from esplora".to_string(),
         };
-
         let hash_info_url = esplora.to_string() + "block/" + &hash_response;
         let hash_info_response = match handle_get_request(hash_info_url).await {
             Some(response) => response,
