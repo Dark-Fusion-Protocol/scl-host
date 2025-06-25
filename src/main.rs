@@ -1151,8 +1151,8 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
 
 async fn handle_check_transfer_details_request(
     txid: String,
-) -> Result<impl Reply, Rejection> {
-    println!("[DEBUG] /transfer_details/{} called", txid);
+) -> Result<impl Reply, Rejection> {    
+        println!("[DEBUG] /transfer_details/{} called", txid);
     let contract_ids = match get_contracts() {
         Ok(ids) => ids,
         Err(_) => {
@@ -1212,44 +1212,44 @@ async fn handle_check_transfer_details_request(
                     }
                 };
 
-                // Collect sender addresses from vin
-                let mut sender_addresses = Vec::new();
+                // Group senders: address -> total sent
+                use std::collections::HashMap;
+                let mut sender_map: HashMap<String, u64> = HashMap::new();
                 if let Some(vin) = tx_info.vin {
                     for input in vin {
-                        if let Some(addr) = input.prevout.as_ref().and_then(|p| p.scriptpubkey_address.clone()) {
-                            sender_addresses.push(addr);
+                        if let (Some(addr), Some(value)) = (
+                            input.prevout.as_ref().and_then(|p| p.scriptpubkey_address.clone()),
+                            input.prevout.as_ref().and_then(|p| p.value)
+                        ) {
+                            *sender_map.entry(addr).or_insert(0) += value;
                         }
                     }
                 }
+                let senders: Vec<_> = sender_map.into_iter().map(|(address, amount_sent)| serde_json::json!({"address": address, "amount_sent": amount_sent})).collect();
 
-                // Collect recipient addresses from vout
-                let mut recipient_addresses = Vec::new();
+                // Group recipients: address -> total received
+                let mut recipient_map: HashMap<String, u64> = HashMap::new();
                 if let Some(vout) = tx_info.vout {
-                    for (recipient_utxo, _amount) in &recipients {
-                        // recipient_utxo is "txid:vout"
-                        let parts: Vec<&str> = recipient_utxo.split(':').collect();
-                        if parts.len() == 2 {
-                            if let Ok(vout_index) = parts[1].parse::<usize>() {
-                                if let Some(output) = vout.get(vout_index) {
-                                    if let Some(addr) = output.scriptpubkey_address.clone() {
-                                        recipient_addresses.push(addr);
-                                    }
-                                }
-                            }
+                    for output in vout {
+                        if let (Some(addr), Some(value)) = (output.scriptpubkey_address.clone(), output.value) {
+                            *recipient_map.entry(addr).or_insert(0) += value;
                         }
                     }
                 }
+                let recipients: Vec<_> = recipient_map.into_iter().map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received})).collect();
 
-                let total_amount: u64 = recipients.iter().map(|(_, amount)| *amount).sum();
+                let total_amount: u64 = recipients.iter().map(|r| r["amount_received"].as_u64().unwrap_or(0)).sum();
 
+                let status = if !pending { "confirmed" } else { "pending" };
                 let response = serde_json::json!({
                     "contract_id": contract.contractid,
                     "ticker": contract.ticker,
                     "amount": total_amount,
-                    "senders": sender_addresses,
-                    "recipients": recipient_addresses,
+                    "senders": senders,
+                    "recipients": recipients,
+                    "status": status
                 });
-                println!("[DEBUG] Returning transfer details for txid={} contract_id={}", txid, contract_id);
+                println!("[DEBUG] Returning transfer details for txid={} contract_id={} status={}", txid, contract_id, status);
                 return Ok(warp::reply::json(&response));
             }
         }
@@ -1657,30 +1657,6 @@ async fn great_sort() {
             let duration = Local::now().naive_local() - command_date;
             let two_mins = chrono::Duration::minutes(2);
             if res.0 == false {
-                if duration > two_mins {
-                    let path_from_string: &Path = Path::new(&command.1);
-                    if path_from_string.is_file() {
-                        let _res = fs::remove_file(&path_from_string);
-                    }
-                }
-
-                continue;
-            }
-
-            claims.push((command.0, command.1, res.0, res.1, res.2));
-        }
-
-        claims.sort_by(|(_, _, _, _, amount_1), (_, _, _, _, amount_2)| amount_2.cmp(amount_1));
-        for command in claims {
-            let command_date =
-                match NaiveDateTime::parse_from_str(&command.0.time_added, "%Y-%m-%d %H:%M:%S") {
-                    Ok(command_date) => command_date,
-                    Err(_) => continue,
-                };
-
-            let duration = Local::now().naive_local() - command_date;
-            let two_mins = chrono::Duration::minutes(2);
-            if command.2 == false {
                 if duration > two_mins {
                     let path_from_string: &Path = Path::new(&command.1);
                     if path_from_string.is_file() {
@@ -2159,13 +2135,6 @@ fn get_contract_field(
                 Err(_) => return Err("Unable to read contract".to_string()),
             };
             return Ok(format!("{}", result));
-        }
-
-        "ticker" => {
-            return Ok(format!(
-                "{{\"Ticker\":\"{}\"}}",
-                contract.ticker.to_string()
-            ));
         }
 
         "contractid" => {
