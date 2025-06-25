@@ -1186,12 +1186,25 @@ async fn handle_check_transfer_details_request(
                         },
                     };
 
+                // Collect all unique UTXOs from senders and recipients
+                let mut utxo_set = std::collections::HashSet::new();
+                for sender in &senders {
+                    utxo_set.insert(sender.clone());
+                }
+                for (recipient_utxo, _) in &recipients {
+                    utxo_set.insert(recipient_utxo.clone());
+                }
+                let utxo_list: Vec<String> = utxo_set.into_iter().collect();
+
+                // Resolve UTXOs to addresses
+                let utxo_to_address = utils::get_addresses_for_utxos(utxo_list).await;
+
                 // Group senders by address and sum SCL token amounts (if available)
                 use std::collections::HashMap;
                 let mut sender_map: HashMap<String, u64> = HashMap::new();
                 for sender in &senders {
-                    // If senders vector contains amounts, use them here. Otherwise, just count occurrences.
-                    *sender_map.entry(sender.clone()).or_insert(0) += 1;
+                    let address = utxo_to_address.get(sender).cloned().unwrap_or(sender.clone());
+                    *sender_map.entry(address).or_insert(0) += 1;
                 }
                 let senders_json: Vec<_> = sender_map.into_iter()
                     .map(|(address, amount_sent)| serde_json::json!({"address": address, "amount_sent": amount_sent}))
@@ -1199,8 +1212,9 @@ async fn handle_check_transfer_details_request(
 
                 // Group recipients by address and sum SCL token amounts
                 let mut recipient_map: HashMap<String, u64> = HashMap::new();
-                for (address, amount) in &recipients {
-                    *recipient_map.entry(address.clone()).or_insert(0) += *amount;
+                for (utxo, amount) in &recipients {
+                    let address = utxo_to_address.get(utxo).cloned().unwrap_or(utxo.clone());
+                    *recipient_map.entry(address).or_insert(0) += *amount;
                 }
                 let recipients_json: Vec<_> = recipient_map.into_iter()
                     .map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received}))

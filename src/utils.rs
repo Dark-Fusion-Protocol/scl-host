@@ -819,3 +819,30 @@ pub fn save_command_backup(command: &CommandStruct, pending: bool) {
         Err(_) => return,
     };
 }
+
+/// Given a list of UTXOs in the format "txid:vout", returns a map of UTXO -> address.
+/// If a UTXO cannot be resolved, it will not be included in the result.
+pub async fn get_addresses_for_utxos(utxos: Vec<String>) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    for utxo in utxos {
+        let parts: Vec<&str> = utxo.split(':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let txid = parts[0];
+        let vout: usize = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Ok(tx_info) = get_transaction(txid, false).await {
+            if let Some(vouts) = tx_info.vout {
+                if let Some(vout_obj) = vouts.get(vout) {
+                    if let Some(address) = &vout_obj.scriptpubkey_address {
+                        result.insert(utxo.clone(), address.clone());
+                    }
+                }
+            }
+        }
+    }
+    result
+}
