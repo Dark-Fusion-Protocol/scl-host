@@ -1338,26 +1338,22 @@ async fn handle_check_transfer_details_request(
     };
 
 
-    // Only return confirmed if it exists, otherwise pending, never both
-    let mut confirmed_result: Option<serde_json::Value> = None;
-    let mut pending_result: Option<serde_json::Value> = None;
+
+    // Collect all confirmed/pending results for each contract, prefer confirmed
+    use std::collections::HashMap;
+    let mut results_map: HashMap<String, serde_json::Value> = HashMap::new();
     for contract_id in contract_ids {
-        // Check confirmed first
-        for &(pending, result_slot) in &[(false, 0), (true, 1)] {
-            let contract = match read_contract(&contract_id, pending) {
+        let mut confirmed: Option<serde_json::Value> = None;
+        let mut pending: Option<serde_json::Value> = None;
+        for &is_pending in &[false, true] {
+            let contract = match read_contract(&contract_id, is_pending) {
                 Ok(c) => c,
-                Err(e) => {
-                    println!("[DEBUG] Skipping contract_id={} pending={} due to error: {:?}", contract_id, pending, e);
-                    continue;
-                }
+                Err(_) => continue,
             };
             if let Some(payload) = contract.payloads.get(&txid) {
                 let commands = match utils::extract_commands(payload) {
                     Ok(cmds) => cmds,
-                    Err(e) => {
-                        println!("[DEBUG] extract_commands error for txid={} contract_id={}: {:?}", txid, contract_id, e);
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
                 let mut all_senders: Vec<String> = Vec::new();
                 let mut all_recipients: Vec<(String, u64)> = Vec::new();
@@ -1368,20 +1364,15 @@ async fn handle_check_transfer_details_request(
                         let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
                             match scl01_utils::handle_transfer_payload(&txid, &format!("{{{}}}", cmd)) {
                                 Ok(res) => res,
-                                Err(e) => {
-                                    println!("[DEBUG] handle_transfer_payload error for txid={} contract_id={}: {:?}", txid, contract_id, e);
-                                    continue;
-                                },
+                                Err(_) => continue,
                             };
                         all_senders.extend(senders);
                         all_recipients.extend(recipients);
                     }
                 }
                 if !found_transfer {
-                    println!("[DEBUG] Found payload for txid={} in contract_id={}, but not a TRANSFER", txid, contract_id);
                     continue;
                 }
-
                 let mut utxo_set = std::collections::HashSet::new();
                 for sender in &all_senders {
                     utxo_set.insert(sender.clone());
@@ -1390,9 +1381,7 @@ async fn handle_check_transfer_details_request(
                     utxo_set.insert(recipient_utxo.clone());
                 }
                 let utxo_list: Vec<String> = utxo_set.into_iter().collect();
-
                 let utxo_to_address = utils::get_addresses_for_utxos(utxo_list).await;
-
                 use std::collections::HashSet;
                 let mut sender_set: HashSet<String> = HashSet::new();
                 for sender in &all_senders {
@@ -1402,7 +1391,6 @@ async fn handle_check_transfer_details_request(
                 let senders_json: Vec<_> = sender_set.into_iter()
                     .map(|address| serde_json::json!({"address": address}))
                     .collect();
-
                 let mut recipient_map: HashMap<String, u64> = HashMap::new();
                 for (utxo, amount) in &all_recipients {
                     let address = utxo_to_address.get(utxo).cloned().unwrap_or(utxo.clone());
@@ -1411,10 +1399,8 @@ async fn handle_check_transfer_details_request(
                 let recipients_json: Vec<_> = recipient_map.into_iter()
                     .map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received}))
                     .collect();
-
                 let total_amount: u64 = all_recipients.iter().map(|(_, amount)| *amount).sum();
-
-                let status = if !pending { "confirmed" } else { "pending" };
+                let status = if !is_pending { "confirmed" } else { "pending" };
                 let response = serde_json::json!({
                     "contract_id": contract.contractid,
                     "ticker": contract.ticker,
@@ -1423,20 +1409,23 @@ async fn handle_check_transfer_details_request(
                     "recipients": recipients_json,
                     "status": status
                 });
-                println!("[DEBUG] Returning transfer details for txid={} contract_id={} status={}", txid, contract_id, status);
-                if !pending {
-                    confirmed_result = Some(response);
-                } else if pending_result.is_none() {
-                    pending_result = Some(response);
+                if !is_pending {
+                    confirmed = Some(response);
+                    break; // Prefer confirmed, skip pending
+                } else {
+                    pending = Some(response);
                 }
             }
         }
+        if let Some(resp) = confirmed {
+            results_map.insert(contract_id.clone(), resp);
+        } else if let Some(resp) = pending {
+            results_map.insert(contract_id.clone(), resp);
+        }
     }
-
-    if let Some(result) = confirmed_result {
-        return Ok(warp::reply::json(&result));
-    } else if let Some(result) = pending_result {
-        return Ok(warp::reply::json(&result));
+    let results: Vec<serde_json::Value> = results_map.into_values().collect();
+    if !results.is_empty() {
+        return Ok(warp::reply::json(&results));
     }
 
     println!("[DEBUG] Transfer not found for txid={}", txid);
