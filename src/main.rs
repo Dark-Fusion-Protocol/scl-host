@@ -1,3 +1,5 @@
+// Use the shared utility for recording failed transactions
+use utils::record_failed_transaction;
 use chrono::{Local, NaiveDateTime};
 use crypto_hash::{hex_digest, Algorithm};
 use hex::FromHex;
@@ -445,6 +447,13 @@ async fn handle_command_request(req: CommandStruct) -> Result<impl Reply, Reject
     };
 
     if !res.0 || !res.1 {
+        // Record failed transaction
+        let reason = if !res.0 {
+            "validation_failed"
+        } else {
+            "not_added_to_state"
+        };
+        record_failed_transaction(&req.txid, reason);
         let current_date_time = Local::now();
         let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
         let pending_command = PendingCommandStruct {
@@ -606,6 +615,13 @@ async fn handle_relayed_command_request(
     };
 
     if !res.0 || !res.1 {
+        // Record failed transaction
+        let reason = if !res.0 {
+            "validation_failed"
+        } else {
+            "not_added_to_state"
+        };
+        record_failed_transaction(&req.txid, reason);
         let current_date_time = Local::now();
         let formatted_date_time = current_date_time.format("%Y-%m-%d %H:%M:%S").to_string();
         let pending_command = PendingCommandStruct {
@@ -847,6 +863,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let response = match handle_get_request(url).await {
         Some(response) => response,
         None => {
+            record_failed_transaction(&req.txid, "unable_to_check_esplora");
             return Err(reject::custom(CustomError {
                 message: "Unable to check esplora".to_string(),
             }))
@@ -856,6 +873,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
         Ok(tx_info) => tx_info,
         Err(_) => {
+            record_failed_transaction(&req.txid, "unable_to_deserialize_txinfo");
             return Err(reject::custom(CustomError {
                 message: "Unable to deserialize txinfo".to_string(),
             }))
@@ -864,6 +882,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let vout = match tx_info.vout {
         Some(vout) => vout,
         None => {
+            record_failed_transaction(&req.txid, "invalid_outputs");
             return Err(reject::custom(CustomError {
                 message: "INVALID OUTPUTS".to_string(),
             }))
@@ -875,6 +894,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
         let scriptpubkey_type = match output.scriptpubkey_type {
             Some(scriptpubkey_type) => scriptpubkey_type,
             None => {
+                record_failed_transaction(&req.txid, "invalid_scriptpubkeytype");
                 return Err(reject::custom(CustomError {
                     message: "INVALID SCRIPTPUBKEYTYPE".to_string(),
                 }))
@@ -886,6 +906,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
         }
     }
     if op_return_flag {
+        record_failed_transaction(&req.txid, "op_return_found_invalid_rebind");
         return Err(reject::custom(CustomError {
             message: "OP_RETURN FOUND, INVALID REBIND".to_string(),
         }));
@@ -894,6 +915,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let vin = match tx_info.vin {
         Some(vin) => vin,
         None => {
+            record_failed_transaction(&req.txid, "unable_to_fetch_inputs");
             return Err(reject::custom(CustomError {
                 message: "Unable to fetch inputs".to_string(),
             }))
@@ -902,6 +924,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let status = match tx_info.status {
         Some(status) => status,
         None => {
+            record_failed_transaction(&req.txid, "unable_to_fetch_tx_status");
             return Err(reject::custom(CustomError {
                 message: "Unable to fetch tx status".to_string(),
             }))
@@ -910,12 +933,14 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let confirmed = match status.confirmed {
         Some(confirmed) => confirmed,
         None => {
+            record_failed_transaction(&req.txid, "unable_to_fetch_tx_status_confirmed");
             return Err(reject::custom(CustomError {
                 message: "Unable to fetch tx status confirmed".to_string(),
             }))
         }
     };
     if vin.len() == 0 {
+        record_failed_transaction(&req.txid, "no_inputs");
         return Err(reject::custom(CustomError {
             message: "transaction has has no inputs".to_string(),
         }));
@@ -923,6 +948,7 @@ async fn handle_rebind(req: CommandStruct) -> Result<impl Reply, Rejection> {
     let mut contract = match read_contract(&req.payload, false) {
         Ok(contract) => contract,
         Err(_) => {
+            record_failed_transaction(&req.txid, "unable_to_read_contract");
             return Err(reject::custom(CustomError {
                 message: "unable to read contract".to_string(),
             }))
@@ -1410,6 +1436,30 @@ async fn handle_check_transfer_details_request(
     }
 
     println!("[DEBUG] Transfer not found for txid={}", txid);
+
+    // Check /Json/Failures for a file matching the txid
+    let failures_dir = "./Json/Failures";
+    if let Ok(entries) = std::fs::read_dir(failures_dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+            // File format: {Txid}-{Reason}.txt
+            if file_name_str.starts_with(&txid) && file_name_str.ends_with(".txt") {
+                // Extract reason from filename
+                let reason = file_name_str
+                    .strip_prefix(&format!("{}-", txid))
+                    .and_then(|s| s.strip_suffix(".txt"))
+                    .unwrap_or("");
+                let response = serde_json::json!({
+                    "status": "failed",
+                    "reason": reason,
+                    "txid": txid
+                });
+                return Ok(warp::reply::json(&response));
+            }
+        }
+    }
+
     Err(warp::reject::custom(CustomError {
         message: "Transfer not found".to_string(),
     }))

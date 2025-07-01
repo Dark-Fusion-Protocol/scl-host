@@ -1,3 +1,20 @@
+/// Record a failed transaction with its txid and reason in /Json/Failures as a text file.
+/// The file is named `{txid}-{reason}.txt` (reason sanitized for filename).
+pub fn record_failed_transaction(txid: &str, reason: &str) {
+    use std::fs;
+    use std::io::Write;
+    let failures_dir = "./Json/Failures";
+    if !std::path::Path::new(failures_dir).exists() {
+        let _ = fs::create_dir_all(failures_dir);
+    }
+    // Sanitize reason for filename (remove spaces and special chars)
+    let sanitized_reason = reason.replace(" ", "_").replace("/", "_").replace("\\", "_");
+    let filename = format!("{}/{}-{}.txt", failures_dir, txid, sanitized_reason);
+    let content = format!("txid: {}\nreason: {}\ndate: {}\n", txid, reason, chrono::Local::now().to_rfc3339());
+    if let Ok(mut file) = fs::File::create(&filename) {
+        let _ = file.write_all(content.as_bytes());
+    }
+}
 use chrono::Local;
 use regex::Regex;
 use reqwest::Client;

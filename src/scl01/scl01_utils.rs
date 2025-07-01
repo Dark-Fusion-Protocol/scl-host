@@ -1,3 +1,4 @@
+use crate::utils::record_failed_transaction;
 use super::scl01_contract::{Bid, LiquidityPool, Listing, SCL01Contract};
 use crate::{
     scl01::scl01_contract::{DimAirdrop, DGE},
@@ -16,9 +17,12 @@ use std::collections::HashMap;
 use std::fs;
 
 pub fn perform_minting_scl01(txid: &str, payload: &str) {
+
     match read_contract(txid, false) {
         Ok(_) => return,
-        Err(_) => {}
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+        }
     };
 
     if let Ok(captures) = handle_mint_payload(payload, txid) {
@@ -61,7 +65,10 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
             data.clone(),
         ) {
             Ok(_) => {}
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "write_utxo_failed");
+                return;
+            }
         };
 
         match serde_json::to_string(&new_contract) {
@@ -99,61 +106,96 @@ pub fn perform_minting_scl01(txid: &str, payload: &str) {
                 };
                 let result = match serde_json::to_string(&import) {
                     Ok(result) => result,
-                    Err(_) => return,
+                    Err(_) => {
+                        record_failed_transaction(txid, "import_to_string_failed");
+                        return;
+                    }
                 };
                 write_to_file(path, result);
             }
-            Err(_) => {}
+            Err(_) => {
+                record_failed_transaction(txid, "contract_to_string_failed");
+            }
         };
     }
 }
 
 pub fn perform_minting_scl02(txid: &str, payload: &str) {
+
     match read_contract(txid, false) {
         Ok(_) => return,
-        Err(_) => {}
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+        }
     };
+
 
     let re = match Regex::new(r"\[([^,]+),([^,]+),([^,]+),([^]]+)]") {
         Ok(re) => re,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "regex_failed");
+            return;
+        }
     };
 
     if let Some(captures) = re.captures(&payload) {
+
         let ticker = match captures.get(1) {
             Some(ticker) => ticker.as_str(),
-            None => return,
+            None => {
+                record_failed_transaction(txid, "ticker_parse_failed");
+                return;
+            }
         };
 
         let max_supply_str = match captures.get(2) {
             Some(max_supply_str) => max_supply_str.as_str(),
-            None => return,
+            None => {
+                record_failed_transaction(txid, "max_supply_parse_failed");
+                return;
+            }
         };
 
         let airdrop_amount_str = match captures.get(3) {
             Some(airdrop_amount_str) => airdrop_amount_str.as_str(),
-            None => return,
+            None => {
+                record_failed_transaction(txid, "airdrop_amount_parse_failed");
+                return;
+            }
         };
 
         let decimals_str = match captures.get(4) {
             Some(decimals_str) => decimals_str.as_str(),
-            None => return,
+            None => {
+                record_failed_transaction(txid, "decimals_parse_failed");
+                return;
+            }
         };
 
         // Parse strings to numeric types
+
         let max_supply = match max_supply_str.parse() {
             Ok(max_supply) => max_supply,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "max_supply_parse_failed");
+                return;
+            }
         };
 
         let airdrop_amount = match airdrop_amount_str.parse() {
             Ok(airdrop_amount) => airdrop_amount,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "airdrop_amount_parse_failed");
+                return;
+            }
         };
 
         let decimals = match decimals_str.parse() {
             Ok(decimals) => decimals,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "decimals_parse_failed");
+                return;
+            }
         };
 
         let max_air_drops = max_supply / airdrop_amount;
@@ -220,19 +262,27 @@ pub fn perform_minting_scl02(txid: &str, payload: &str) {
                 };
                 let result = match serde_json::to_string(&import) {
                     Ok(result) => result,
-                    Err(_) => return,
+                    Err(_) => {
+                        record_failed_transaction(txid, "import_to_string_failed");
+                        return;
+                    }
                 };
                 write_to_file(path, result);
             }
-            Err(_) => {}
+            Err(_) => {
+                record_failed_transaction(txid, "contract_to_string_failed");
+            }
         };
     }
 }
 
 pub fn perform_minting_scl03(txid: &str, payload: &str) {
+
     match read_contract(txid, false) {
         Ok(_) => return,
-        Err(_) => {}
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+        }
     };
 
     if let Ok(captures) = handle_mint_rtm_payload(payload, txid) {
@@ -303,11 +353,16 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
                 };
                 let result = match serde_json::to_string(&import) {
                     Ok(result) => result,
-                    Err(_) => return,
+                    Err(_) => {
+                        record_failed_transaction(txid, "import_to_string_failed");
+                        return;
+                    }
                 };
                 write_to_file(path, result);
             }
-            Err(_) => {}
+            Err(_) => {
+                record_failed_transaction(txid, "contract_to_string_failed");
+            }
         };
     }
 }
@@ -315,25 +370,36 @@ pub fn perform_minting_scl03(txid: &str, payload: &str) {
 pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_rtm_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_rtm_payload_failed");
+            return;
+        }
     };
 
     let utxos: Vec<String> = vec![results.0.clone()];
     if !check_utxo_inputs(&utxos, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
@@ -346,7 +412,10 @@ pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pe
         &results.3,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "contract_right_to_mint_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -372,12 +441,18 @@ pub async fn perform_rights_to_mint(txid: &str, command: &str, payload: &str, pe
 pub fn perform_airdrop(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let contract_pending = match read_contract(contract_id.as_str(), true) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_pending_failed");
+            return;
+        }
     };
 
     let p_c = match contract_pending.pending_claims.clone() {
@@ -387,15 +462,20 @@ pub fn perform_airdrop(txid: &str, command: &str, payload: &str, pending: bool) 
 
     let mut contract = match read_contract(contract_id.as_str(), false) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
     contract.pending_claims = Some(p_c);
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let words: Vec<&str> = command.split("AIRDROP").collect();
     if words.len() < 2 {
+        record_failed_transaction(txid, "malformed_airdrop_command");
         return;
     }
 
@@ -405,7 +485,10 @@ pub fn perform_airdrop(txid: &str, command: &str, payload: &str, pending: bool) 
     let amount = match contract.airdop(&txid.to_string(), &payload.to_string(), &reciever, pending)
     {
         Ok(amount) => amount,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "airdrop_failed");
+            return;
+        }
     };
 
     if !pending {
@@ -425,7 +508,10 @@ pub fn perform_airdrop(txid: &str, command: &str, payload: &str, pending: bool) 
 pub fn perform_airdrop_split(mut contract: SCL01Contract) {
     let new_owners = match contract.airdop_split() {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            // No txid available, so we can't record_failed_transaction here
+            return;
+        }
     };
 
     for owner in new_owners {
@@ -440,30 +526,44 @@ pub fn perform_airdrop_split(mut contract: SCL01Contract) {
 pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_transfer_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_transfer_payload_failed");
+            return;
+        }
     };
 
     if !check_utxo_inputs(&results.0, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
     let block_height = match get_current_block_height().await {
         Ok(block_height) => block_height,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            return;
+        }
     };
 
     let drip = match contract.transfer(
@@ -474,7 +574,10 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
         block_height as u64,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "contract_transfer_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -497,7 +600,10 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
             }
             match fs::write(format!("./Json/UTXOS/{}.txt", &key), data.clone()) {
                 Ok(_) => {}
-                Err(_) => return,
+                Err(_) => {
+                    record_failed_transaction(txid, "write_utxo_failed");
+                    return;
+                }
             };
         }
 
@@ -505,7 +611,10 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
 
         let mut interactions = match read_contract_interactions(&contract_id) {
             Ok(interactions) => interactions,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "read_contract_interactions_failed");
+                return;
+            }
         };
 
         interactions.total_transfers += 1;
@@ -516,7 +625,10 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
         interactions.total_transfer_value += total_value;
         match save_contract_interactions(&interactions, &contract_id) {
             Ok(_) => interactions,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "save_contract_interactions_failed");
+                return;
+            }
         };
     } else {
         for (index, (key, value)) in results.1.iter().enumerate() {
@@ -529,7 +641,10 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
 
             match fs::write(format!("./Json/UTXOS/{}.txt", &key), data.clone()) {
                 Ok(_) => {}
-                Err(_) => return,
+                Err(_) => {
+                    record_failed_transaction(txid, "write_utxo_failed_pending");
+                    return;
+                }
             };
         }
     }
@@ -538,20 +653,28 @@ pub async fn perform_transfer(txid: &str, command: &str, payload: &str, pending:
 pub async fn perform_burn(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     if let Ok(result) = handle_burn_payload(txid, payload) {
         if !check_utxo_inputs(&result.0, &txid).await {
+            record_failed_transaction(txid, "check_utxo_inputs_failed");
             return;
         }
 
@@ -563,7 +686,10 @@ pub async fn perform_burn(txid: &str, command: &str, payload: &str, pending: boo
             &result.2,
         ) {
             Ok(_) => {}
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "contract_burn_failed");
+                return;
+            }
         };
 
         let _ = save_contract(&contract, payload, txid, true);
@@ -571,41 +697,60 @@ pub async fn perform_burn(txid: &str, command: &str, payload: &str, pending: boo
             let _ = save_contract(&contract, payload, txid, false);
             let mut interactions = match read_contract_interactions(&contract_id) {
                 Ok(interactions) => interactions,
-                Err(_) => return,
+                Err(_) => {
+                    record_failed_transaction(txid, "read_contract_interactions_failed");
+                    return;
+                }
             };
 
             interactions.total_burns += 1;
             match save_contract_interactions(&interactions, &contract_id) {
                 Ok(_) => interactions,
-                Err(_) => return,
+                Err(_) => {
+                    record_failed_transaction(txid, "save_contract_interactions_failed");
+                    return;
+                }
             };
         }
+    } else {
+        record_failed_transaction(txid, "handle_burn_payload_failed");
     }
 }
 
 pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     if let Ok(result) = handle_list_payload(txid, command) {
         if !check_utxo_inputs(&result.0, &txid).await {
+            record_failed_transaction(txid, "check_utxo_inputs_failed");
             return;
         }
 
         let block_height = match get_current_block_height().await {
             Ok(block_height) => block_height,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "get_current_block_height_failed");
+                return;
+            }
         };
 
         let listing = Listing {
@@ -625,7 +770,10 @@ pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: boo
             block_height as u64,
         ) {
             Ok(o) => o,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "contract_list_failed");
+                return;
+            }
         };
 
         let _ = save_contract(&contract, payload, txid, true);
@@ -635,7 +783,9 @@ pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: boo
                 // Attempt to remove the file
                 match fs::remove_file(file_path) {
                     Ok(_) => {}
-                    Err(_) => {}
+                    Err(_) => {
+                        record_failed_transaction(txid, "remove_utxo_file_failed");
+                    }
                 }
             }
 
@@ -650,7 +800,10 @@ pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: boo
                     data.clone(),
                 ) {
                     Ok(_) => {}
-                    Err(_) => return,
+                    Err(_) => {
+                        record_failed_transaction(txid, "write_utxo_file_failed");
+                        return;
+                    }
                 };
             }
 
@@ -671,6 +824,8 @@ pub async fn perform_list(txid: &str, command: &str, payload: &str, pending: boo
 
             let _ = update_list_utxos(listing.clone(), contract.clone(), true, &result.0[0]);
         }
+    } else {
+        record_failed_transaction(txid, "handle_list_payload_failed");
     }
 }
 
@@ -740,32 +895,47 @@ pub async fn perform_bid(
     trade_txs: &Vec<TradeTx>,
     pending: bool,
 ) {
+
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let listings = match contract.listings.clone() {
         Some(listings) => listings,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_listings_found");
+            return;
+        }
     };
+
 
     let words: Vec<&str> = command.split("BID").collect();
     if words.len() < 2 {
+        record_failed_transaction(txid, "split_bid_failed");
         return;
     }
 
+
     let bid_split: Vec<&str> = words[1].split("],").collect();
     if bid_split.len() < 1 {
+        record_failed_transaction(txid, "bid_split_failed");
         return;
     }
 
@@ -775,6 +945,7 @@ pub async fn perform_bid(
     for split in bid_split {
         let bid_info: Vec<&str> = split.split(",").collect();
         if bid_info.len() < 4 {
+            record_failed_transaction(txid, "bid_info_split_failed");
             continue;
         }
         order_id_split = replace_payload_special_characters(&bid_info[0].to_string());
@@ -788,9 +959,13 @@ pub async fn perform_bid(
             }
         }
 
+
         let listing = match listings.get(&order_id_split) {
             Some(listing) => listing,
-            None => continue,
+            None => {
+                record_failed_transaction(txid, "listing_not_found");
+                continue;
+            }
         };
 
         if accept_tx == "".to_string() || fulfil_tx == "".to_string() {
@@ -798,37 +973,61 @@ pub async fn perform_bid(
         }
 
         let amount_split = replace_payload_special_characters(&bid_info[1].to_string());
+
         let amt = match amount_split.parse::<u64>() {
             Ok(amt) => amt,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(txid, "amount_parse_failed");
+                continue;
+            }
         };
 
         let price_split = replace_payload_special_characters(&bid_info[2].to_string());
+
         let price = match price_split.parse::<u64>() {
             Ok(amt) => amt,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(txid, "price_parse_failed");
+                continue;
+            }
         };
 
         let mut res_utxo_str = replace_payload_special_characters(&bid_info[3].to_string());
         res_utxo_str = res_utxo_str.replace("TXID", txid);
+
         let txid = match get_txid_from_hash(&fulfil_tx) {
             Ok(txid) => txid,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(txid, "get_txid_from_hash_failed");
+                continue;
+            }
         };
+
 
         let tx_bytes = match decode(&fulfil_tx) {
             Ok(tx_bytes) => tx_bytes,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(&txid, "decode_fulfil_tx_failed");
+                continue;
+            }
         };
+
 
         let transaction: Transaction = match deserialize(&tx_bytes) {
             Ok(transaction) => transaction,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(&txid, "deserialize_tx_bytes_failed");
+                continue;
+            }
         };
+
 
         let rec_add: Address = match listing.rec_addr.parse::<Address>() {
             Ok(a) => a,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(&txid, "parse_rec_addr_failed");
+                continue;
+            }
         };
 
         let mut total_value = 0;
@@ -842,13 +1041,19 @@ pub async fn perform_bid(
             continue;
         }
 
-        bidding_ids.push(txid);
+        bidding_ids.push(txid.clone());
+
         let fullfilment_utxos = match get_utxos_from_hash(&fulfil_tx) {
             Ok(fullfilment_utxos) => fullfilment_utxos,
-            Err(_) => continue,
+            Err(_) => {
+                record_failed_transaction(&txid, "get_utxos_from_hash_failed");
+                continue;
+            }
         };
 
+
         if fullfilment_utxos.len() == 0 {
+            record_failed_transaction(&txid, "no_fullfilment_utxos");
             continue;
         }
 
@@ -864,10 +1069,15 @@ pub async fn perform_bid(
         bids.push(bid);
     }
 
+
     let block_height = match get_current_block_height().await {
         Ok(block_height) => block_height,
-        Err(_) => 0,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            0
+        }
     };
+
 
     match contract.bid(
         &txid.to_string(),
@@ -877,10 +1087,15 @@ pub async fn perform_bid(
         block_height,
     ) {
         Ok(_) => {}
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "contract_bid_failed");
+            return;
+        }
     };
 
+
     let _ = save_contract(&contract, &payload, &txid, true);
+
 
     let default_listings = HashMap::new();
     if !pending {
@@ -891,7 +1106,10 @@ pub async fn perform_bid(
 
         let l = match listings.get(&order_id_split.clone()) {
             Some(listing) => listing,
-            None => return,
+            None => {
+                record_failed_transaction(txid, "listing_not_found_final");
+                return;
+            }
         };
 
         for b in &bids {
@@ -908,6 +1126,7 @@ pub async fn perform_bid(
 
         let _ = save_contract(&contract, payload, txid, false);
         _ = update_list_utxos(l.clone(), contract.clone(), false, &order_id_split.clone());
+
     } else {
         let listings = match contract.listings {
             Some(ref p) => p,
@@ -916,7 +1135,10 @@ pub async fn perform_bid(
 
         let l = match listings.get(&order_id_split.clone()) {
             Some(listing) => listing,
-            None => return,
+            None => {
+                record_failed_transaction(txid, "listing_not_found_final_pending");
+                return;
+            }
         };
 
         for b in &bids {
@@ -936,26 +1158,39 @@ pub async fn perform_bid(
 pub async fn perform_accept_bid(txid: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let bids_available = match contract.bids.clone() {
         Some(bids_available) => bids_available,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_bids_available");
+            return;
+        }
     };
 
     let listings_available = match contract.listings.clone() {
         Some(listings_available) => listings_available,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_listings_available");
+            return;
+        }
     };
 
     let mut listing_utxos: Vec<String> = Vec::new();
@@ -964,7 +1199,10 @@ pub async fn perform_accept_bid(txid: &str, payload: &str, pending: bool) {
     for (key, value) in bids_available.clone() {
         let accept_txid = match get_txid_from_hash(&value.accept_tx) {
             Ok(accept_txid) => accept_txid,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "get_txid_from_hash_failed");
+                return;
+            }
         };
 
         if accept_txid == txid {
@@ -974,18 +1212,23 @@ pub async fn perform_accept_bid(txid: &str, payload: &str, pending: bool) {
     }
 
     if bid_id == "" || order_id == "" {
+        record_failed_transaction(txid, "bid_id_or_order_id_empty");
         return;
     }
 
     listing_utxos.push(listings_available[&order_id].list_utxo.clone());
 
     if !check_utxo_inputs(&listing_utxos, &txid.to_string()).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
     match contract.accept_bid(&txid.to_string(), &payload.to_string(), &bid_id) {
         Ok(_) => {}
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "accept_bid_failed");
+            return;
+        }
     };
 
     if pending {
@@ -1010,34 +1253,51 @@ pub async fn perform_accept_bid(txid: &str, payload: &str, pending: bool) {
 pub async fn perform_fulfil_bid(txid: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let listings = match contract.listings.clone() {
         Some(listings) => listings,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_listings_available");
+            return;
+        }
     };
 
     let bids = match contract.bids.clone() {
         Some(bids) => bids,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_bids_available");
+            return;
+        }
     };
 
     let fulfillments = match contract.fulfillments.clone() {
         Some(fulfillments) => fulfillments,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_fulfillments_available");
+            return;
+        }
     };
 
     if !fulfillments.contains_key(txid) {
+        record_failed_transaction(txid, "fulfillment_not_found");
         return;
     }
 
@@ -1052,7 +1312,10 @@ pub async fn perform_fulfil_bid(txid: &str, payload: &str, pending: bool) {
     let (new_owners, bids, listing) =
         match contract.fulfil(&txid.to_string(), &payload.to_string(), &txid.to_string()) {
             Ok(n) => n,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "fulfil_failed");
+                return;
+            }
         };
 
     let _ = save_contract(&contract, payload, &txid, true);
@@ -1099,30 +1362,44 @@ pub async fn perform_fulfil_bid(txid: &str, payload: &str, pending: bool) {
 pub async fn perform_drip_start(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_drip_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_drip_payload_failed");
+            return;
+        }
     };
 
     if !check_utxo_inputs(&results.0, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
     let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            return;
+        }
     };
 
     let new_owners = match contract.start_drip(
@@ -1134,7 +1411,10 @@ pub async fn perform_drip_start(txid: &str, command: &str, payload: &str, pendin
         current_block_height as u64,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "start_drip_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -1192,30 +1472,44 @@ pub async fn perform_create_diminishing_airdrop(
 ) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_create_diminishing_airdrop_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_create_diminishing_airdrop_payload_failed");
+            return;
+        }
     };
 
     if !check_utxo_inputs(&results.0, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
     let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height as u64,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            return;
+        }
     };
 
     let new_owners = match contract.create_dim_airdrop(
@@ -1232,7 +1526,10 @@ pub async fn perform_create_diminishing_airdrop(
         current_block_height,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "create_dim_airdrop_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -1271,27 +1568,42 @@ pub async fn perform_claim_diminishing_airdrop(
 ) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let results = match handle_claim_diminishing_airdrop_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_claim_diminishing_airdrop_payload_failed");
+            return;
+        }
     };
 
     let contract_pending = match read_contract(contract_id.as_str(), true) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_pending_failed");
+            return;
+        }
     };
 
     let dims = match contract_pending.diminishing_airdrops.clone() {
         Some(dims) => dims,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_diminishing_airdrops");
+            return;
+        }
     };
 
     let dim: DimAirdrop = match dims.get(&results.0) {
         Some(dim) => dim.clone(),
-        None => return,
+        None => {
+            record_failed_transaction(txid, "dim_airdrop_not_found");
+            return;
+        }
     };
 
     let mut donater_pub_address: String = String::new();
@@ -1300,34 +1612,51 @@ pub async fn perform_claim_diminishing_airdrop(
         let url: String = esplora.to_string() + "tx/" + &txid;
         let response = match handle_get_request(url).await {
             Some(response) => response,
-            None => return,
+            None => {
+                record_failed_transaction(txid, "handle_get_request_failed");
+                return;
+            }
         };
 
         let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
             Ok(tx_info) => tx_info,
-            Err(_) => return,
+            Err(_) => {
+                record_failed_transaction(txid, "serde_json_parse_txinfo_failed");
+                return;
+            }
         };
 
         let vin = match tx_info.vin {
             Some(vin) => vin,
-            None => return,
+            None => {
+                record_failed_transaction(txid, "no_vin_in_txinfo");
+                return;
+            }
         };
 
         if vin.len() == 0 {
+            record_failed_transaction(txid, "vin_empty");
             return;
         }
 
         let prev_outputs = match &vin[0].prevout {
             Some(prev) => prev,
-            None => return,
+            None => {
+                record_failed_transaction(txid, "no_prevout_in_vin");
+                return;
+            }
         };
 
         donater_pub_address = match &prev_outputs.scriptpubkey_address {
             Some(donater_pub_address) => donater_pub_address.clone(),
-            None => return,
+            None => {
+                record_failed_transaction(txid, "no_scriptpubkey_address_in_prevout");
+                return;
+            }
         };
 
         if dim.claimers.contains_key(&donater_pub_address) {
+            record_failed_transaction(txid, "claimer_already_exists");
             return;
         }
     }
@@ -1339,11 +1668,15 @@ pub async fn perform_claim_diminishing_airdrop(
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     contract.pending_claims = Some(p_c);
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
@@ -1356,7 +1689,10 @@ pub async fn perform_claim_diminishing_airdrop(
         &donater_pub_address,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "claim_dim_airdrop_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -1382,24 +1718,35 @@ pub async fn perform_claim_diminishing_airdrop(
 pub async fn perform_create_dge(txid: &str, command: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_create_dge_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_create_dge_payload_failed");
+            return;
+        }
     };
 
     if !check_utxo_inputs(&results.0, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
@@ -1416,7 +1763,10 @@ pub async fn perform_create_dge(txid: &str, command: &str, payload: &str, pendin
 
     let current_block_height = match get_current_block_height().await {
         Ok(current_block_height) => current_block_height as u64,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            return;
+        }
     };
 
     let new_owners = match contract.create_dge(
@@ -1428,7 +1778,10 @@ pub async fn perform_create_dge(txid: &str, command: &str, payload: &str, pendin
         current_block_height,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "create_dge_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -1467,66 +1820,101 @@ pub async fn perform_claim_dge(
 ) {
     let contract_id = match extract_contract_id(command) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let results = match handle_claim_dge_payload(txid, command) {
         Ok(results) => results,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "handle_claim_dge_payload_failed");
+            return;
+        }
     };
 
     let dges = match contract.dges.clone() {
         Some(dges) => dges,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_dges");
+            return;
+        }
     };
 
     let dge: DGE = match dges.get(&results.0) {
         Some(dge) => dge.clone(),
-        None => return,
+        None => {
+            record_failed_transaction(txid, "dge_not_found");
+            return;
+        }
     };
 
     let url: String = esplora.to_string() + "tx/" + &txid;
     let response = match handle_get_request(url).await {
         Some(response) => response,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "handle_get_request_failed");
+            return;
+        }
     };
 
     let tx_info: TxInfo = match serde_json::from_str::<TxInfo>(&response) {
         Ok(tx_info) => tx_info,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "serde_json_parse_txinfo_failed");
+            return;
+        }
     };
 
     let vin = match tx_info.vin {
         Some(vin) => vin,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_vin_in_txinfo");
+            return;
+        }
     };
 
     if vin.len() == 0 {
+        record_failed_transaction(txid, "vin_empty");
         return;
     }
 
     let prev_outputs = match &vin[0].prevout {
         Some(prev) => prev,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_prevout_in_vin");
+            return;
+        }
     };
 
     let donater_pub_address = match &prev_outputs.scriptpubkey_address {
         Some(donater_pub_address) => donater_pub_address.clone(),
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_scriptpubkey_address_in_prevout");
+            return;
+        }
     };
 
     let vout = match tx_info.vout {
         Some(vout) => vout,
-        None => return,
+        None => {
+            record_failed_transaction(txid, "no_vout_in_txinfo");
+            return;
+        }
     };
 
     let mut donation_amout = 0;
@@ -1547,16 +1935,21 @@ pub async fn perform_claim_dge(
     }
 
     if donation_amout == 0 {
+        record_failed_transaction(txid, "donation_amount_zero");
         return;
     }
 
     if dge.single_drop && dge.donaters.contains_key(&donater_pub_address) {
+        record_failed_transaction(txid, "donater_already_exists");
         return;
     }
 
     let current_block = match get_current_block_height().await {
         Ok(current_block) => current_block as u64,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "get_current_block_height_failed");
+            return;
+        }
     };
 
     let new_owners = match contract.claim_dge(
@@ -1569,7 +1962,10 @@ pub async fn perform_claim_dge(
         current_block,
     ) {
         Ok(res) => res,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "claim_dge_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, txid, true);
@@ -1631,26 +2027,35 @@ pub fn perform_drips(contract_id: String, block_height: u64, pending: bool) {
 pub async fn perform_listing_cancel(txid: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
     let words: Vec<&str> = payload.split("CANCELLISTING").collect();
     if words.len() < 2 {
+        record_failed_transaction(txid, "malformed_cancel_listing_command");
         return;
     }
 
     let listing_utxo = replace_payload_special_characters(&words[1].to_string());
     let utxos: Vec<String> = vec![listing_utxo.clone()];
     if !check_utxo_inputs(&utxos, &txid).await {
+        record_failed_transaction(txid, "check_utxo_inputs_failed");
         return;
     }
 
@@ -1667,7 +2072,10 @@ pub async fn perform_listing_cancel(txid: &str, payload: &str, pending: bool) {
         payload.to_string(),
     ) {
         Ok(owner) => owner,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "cancel_listing_failed");
+            return;
+        }
     };
 
     let _ = save_contract(&contract, payload, &txid, pending);
@@ -1691,15 +2099,22 @@ pub async fn perform_listing_cancel(txid: &str, payload: &str, pending: bool) {
 pub async fn perform_bid_cancel(txid: &str, payload: &str, pending: bool) {
     let contract_id = match extract_contract_id(payload) {
         Ok(contract_id) => contract_id,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "extract_contract_id_failed");
+            return;
+        }
     };
 
     let mut contract = match read_contract(contract_id.as_str(), pending) {
         Ok(contract) => contract,
-        Err(_) => return,
+        Err(_) => {
+            record_failed_transaction(txid, "read_contract_failed");
+            return;
+        }
     };
 
     if contract.payloads.iter().any(|(tx, _)| tx == txid) {
+        record_failed_transaction(txid, "duplicate_txid_in_payloads");
         return;
     }
 
