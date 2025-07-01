@@ -1337,9 +1337,13 @@ async fn handle_check_transfer_details_request(
         }
     };
 
-    let mut results = Vec::new();
+
+    // Only return confirmed if it exists, otherwise pending, never both
+    let mut confirmed_result: Option<serde_json::Value> = None;
+    let mut pending_result: Option<serde_json::Value> = None;
     for contract_id in contract_ids {
-        for &pending in &[false, true] {
+        // Check confirmed first
+        for &(pending, result_slot) in &[(false, 0), (true, 1)] {
             let contract = match read_contract(&contract_id, pending) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1348,7 +1352,6 @@ async fn handle_check_transfer_details_request(
                 }
             };
             if let Some(payload) = contract.payloads.get(&txid) {
-                // Extract all commands in the payload
                 let commands = match utils::extract_commands(payload) {
                     Ok(cmds) => cmds,
                     Err(e) => {
@@ -1356,7 +1359,6 @@ async fn handle_check_transfer_details_request(
                         continue;
                     }
                 };
-                // We'll collect all senders and recipients from all transfer commands
                 let mut all_senders: Vec<String> = Vec::new();
                 let mut all_recipients: Vec<(String, u64)> = Vec::new();
                 let mut found_transfer = false;
@@ -1380,7 +1382,6 @@ async fn handle_check_transfer_details_request(
                     continue;
                 }
 
-                // Collect all unique UTXOs from senders and recipients
                 let mut utxo_set = std::collections::HashSet::new();
                 for sender in &all_senders {
                     utxo_set.insert(sender.clone());
@@ -1390,10 +1391,8 @@ async fn handle_check_transfer_details_request(
                 }
                 let utxo_list: Vec<String> = utxo_set.into_iter().collect();
 
-                // Resolve UTXOs to addresses
                 let utxo_to_address = utils::get_addresses_for_utxos(utxo_list).await;
 
-                // Group senders by address (do not sum amounts, just list unique addresses)
                 use std::collections::HashSet;
                 let mut sender_set: HashSet<String> = HashSet::new();
                 for sender in &all_senders {
@@ -1404,7 +1403,6 @@ async fn handle_check_transfer_details_request(
                     .map(|address| serde_json::json!({"address": address}))
                     .collect();
 
-                // Group recipients by address and sum SCL token amounts
                 let mut recipient_map: HashMap<String, u64> = HashMap::new();
                 for (utxo, amount) in &all_recipients {
                     let address = utxo_to_address.get(utxo).cloned().unwrap_or(utxo.clone());
@@ -1426,13 +1424,19 @@ async fn handle_check_transfer_details_request(
                     "status": status
                 });
                 println!("[DEBUG] Returning transfer details for txid={} contract_id={} status={}", txid, contract_id, status);
-                results.push(response);
+                if !pending {
+                    confirmed_result = Some(response);
+                } else if pending_result.is_none() {
+                    pending_result = Some(response);
+                }
             }
         }
     }
 
-    if !results.is_empty() {
-        return Ok(warp::reply::json(&results));
+    if let Some(result) = confirmed_result {
+        return Ok(warp::reply::json(&result));
+    } else if let Some(result) = pending_result {
+        return Ok(warp::reply::json(&result));
     }
 
     println!("[DEBUG] Transfer not found for txid={}", txid);
