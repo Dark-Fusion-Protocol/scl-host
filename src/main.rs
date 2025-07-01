@@ -37,10 +37,150 @@ use utils::{
     TxInfo, TxidCheck, TxidCheckResponse, UtxoBalanceResult, UtxoBalances,
 };
 
+
 static TXCOMMANDSPATH: &'static str = "./Json/Queues/Confirmed/";
 static PENDINGCOMMANDSPATH: &'static str = "./Json/Queues/Pending/";
 static CONTRACTSPATH: &'static str = "./Json/Contracts/";
 static QUEUESPATH: &'static str = "./Json/Queues/";
+
+// Endpoint: /utxo/balances
+use warp::http::StatusCode;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize)]
+struct UtxoBalancesRequest {
+    utxos: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UtxoBalancesResponse {
+    balances: Vec<UtxoBalanceResult>,
+}
+
+async fn handle_utxo_balances(req: UtxoBalancesRequest) -> Result<impl Reply, Rejection> {
+    // Reuse logic from handle_check_utxo_files, but only for utxos (no contract_ids)
+    let current_block = match get_current_block_height().await {
+        Ok(current_block) => current_block as u64,
+        Err(_) => 0,
+    };
+    let mut results: Vec<UtxoBalanceResult> = Vec::new();
+    for utxo in req.utxos.clone() {
+        let state_str = match read_from_file(format!("./Json/UTXOS/{}.txt", utxo)) {
+            Some(state_str) => state_str,
+            None => "unbound".to_string(),
+        };
+
+        if state_str.contains("unbound") {
+            results.push(UtxoBalanceResult {
+                balance_value: "0".to_string(),
+                balance_type: "{\"Result\":\"UTXO specified is unbound.\"}".to_string(),
+                contract_id: "".to_string(),
+                btc_price: None,
+                num_bids: None,
+                highest_bid: None,
+                drip_amount: None,
+                min_bid: None,
+                list_utxo: None,
+            });
+        } else {
+            let split: Vec<_> = state_str.split(":").collect();
+            if split.len() < 2 {
+                continue;
+            }
+
+            let contract_id = split[0];
+            let second_split: Vec<_> = split[1].split(",").collect();
+            if second_split.len() < 2 {
+                continue;
+            }
+
+            let mut balance_type: String = second_split[0].to_string();
+            let balance_value = second_split[1];
+            let mut btc_price = 0;
+            if second_split.len() >= 3 {
+                btc_price = match second_split[2].parse::<u64>() {
+                    Ok(price) => price,
+                    Err(_) => 0,
+                };
+            }
+
+            let mut num_bids = 0;
+            let mut highest_bid = 0;
+            let mut min_bid = 0;
+            let mut list_utxo: String = "".to_string();
+            if second_split.len() >= 6 {
+                num_bids = match second_split[3].parse::<u64>() {
+                    Ok(price) => price,
+                    Err(_) => 0,
+                };
+
+                highest_bid = match second_split[4].parse::<u64>() {
+                    Ok(price) => price,
+                    Err(_) => 0,
+                };
+                min_bid = match second_split[5].parse::<u64>() {
+                    Ok(price) => price,
+                    Err(_) => 0,
+                };
+            }
+
+            if second_split.len() >= 7 {
+                list_utxo = second_split[6].to_string();
+            }
+
+            if balance_type.contains("B") && second_split.len() >= 5 {
+                if split.len() < 3 {
+                    continue;
+                }
+
+                list_utxo = format!("{}:{}", second_split[4].to_string(), split[2]);
+            }
+
+            let mut drip_amount = None;
+            if balance_type.contains("D") {
+                balance_type = balance_type.replace("D", "");
+                let pending = balance_type.contains("P");
+                let contract = match read_contract(contract_id, pending) {
+                    Ok(contract) => contract,
+                    Err(_) => continue,
+                };
+
+                let all_drips = match contract.drips {
+                    Some(all_drips) => all_drips,
+                    None => continue,
+                };
+
+                let drips = match all_drips.get(&utxo) {
+                    Some(drips) => drips,
+                    None => continue,
+                };
+
+                let mut drip_amt = 0;
+                for drip in drips {
+                    drip_amt += (drip.block_end - current_block) * drip.drip_amount
+                }
+                drip_amount = Some(drip_amt);
+            }
+
+            results.push(UtxoBalanceResult {
+                balance_type: balance_type.to_string(),
+                balance_value: balance_value.to_string(),
+                contract_id: contract_id.to_string(),
+                btc_price: Some(btc_price.to_string()),
+                num_bids: Some(num_bids.to_string()),
+                highest_bid: Some(highest_bid.to_string()),
+                drip_amount,
+                min_bid: Some(min_bid.to_string()),
+                list_utxo: Some(list_utxo.to_string()),
+            });
+        }
+    }
+
+    let res = UtxoBalancesResponse {
+        balances: results,
+    };
+    Ok(warp::reply::json(&res))
+}
 
 #[tokio::main]
 async fn main() {
@@ -60,6 +200,13 @@ async fn main() {
         .and(warp::path("commands"))
         .and(warp::body::json())
         .and_then(handle_command_request);
+
+    // Add /utxo/balances endpoint
+    let utxo_balances = warp::post()
+        .and(warp::path("utxo"))
+        .and(warp::path("balances"))
+        .and(warp::body::json())
+        .and_then(handle_utxo_balances);
 
     let perform_relay = warp::post()
         .and(warp::path("relay_commands"))
@@ -183,6 +330,7 @@ async fn main() {
 
     // Create a warp filter that includes both the GET and POST routes
     let routes = perform_command
+        .or(utxo_balances)
         .or(check_utxos)
         .or(check_summaries)
         .or(listings_for_bids)
@@ -1151,7 +1299,7 @@ async fn handle_get_contracts() -> Result<impl Reply, Rejection> {
 
 async fn handle_check_transfer_details_request(
     txid: String,
-) -> Result<impl Reply, Rejection> {    
+) -> Result<impl Reply, Rejection> {
     println!("[DEBUG] /transfer_details/{} called", txid);
     let contract_ids = match get_contracts() {
         Ok(ids) => ids,
@@ -1163,6 +1311,7 @@ async fn handle_check_transfer_details_request(
         }
     };
 
+    let mut results = Vec::new();
     for contract_id in contract_ids {
         for &pending in &[false, true] {
             let contract = match read_contract(&contract_id, pending) {
@@ -1173,25 +1322,44 @@ async fn handle_check_transfer_details_request(
                 }
             };
             if let Some(payload) = contract.payloads.get(&txid) {
-                if !payload.contains("TRANSFER") {
+                // Extract all commands in the payload
+                let commands = match utils::extract_commands(payload) {
+                    Ok(cmds) => cmds,
+                    Err(e) => {
+                        println!("[DEBUG] extract_commands error for txid={} contract_id={}: {:?}", txid, contract_id, e);
+                        continue;
+                    }
+                };
+                // We'll collect all senders and recipients from all transfer commands
+                let mut all_senders: Vec<String> = Vec::new();
+                let mut all_recipients: Vec<(String, u64)> = Vec::new();
+                let mut found_transfer = false;
+                for cmd in &commands {
+                    if cmd.contains("TRANSFER") {
+                        found_transfer = true;
+                        let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
+                            match scl01_utils::handle_transfer_payload(&txid, &format!("{{{}}}", cmd)) {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    println!("[DEBUG] handle_transfer_payload error for txid={} contract_id={}: {:?}", txid, contract_id, e);
+                                    continue;
+                                },
+                            };
+                        all_senders.extend(senders);
+                        all_recipients.extend(recipients);
+                    }
+                }
+                if !found_transfer {
                     println!("[DEBUG] Found payload for txid={} in contract_id={}, but not a TRANSFER", txid, contract_id);
                     continue;
                 }
-                let (senders, recipients, _extra): (Vec<String>, Vec<(String, u64)>, String) =
-                    match scl01_utils::handle_transfer_payload(&txid, payload) {
-                        Ok(res) => res,
-                        Err(e) => {
-                            println!("[DEBUG] handle_transfer_payload error for txid={} contract_id={}: {:?}", txid, contract_id, e);
-                            (Vec::new(), Vec::new(), String::new())
-                        },
-                    };
 
                 // Collect all unique UTXOs from senders and recipients
                 let mut utxo_set = std::collections::HashSet::new();
-                for sender in &senders {
+                for sender in &all_senders {
                     utxo_set.insert(sender.clone());
                 }
-                for (recipient_utxo, _) in &recipients {
+                for (recipient_utxo, _) in &all_recipients {
                     utxo_set.insert(recipient_utxo.clone());
                 }
                 let utxo_list: Vec<String> = utxo_set.into_iter().collect();
@@ -1202,7 +1370,7 @@ async fn handle_check_transfer_details_request(
                 // Group senders by address (do not sum amounts, just list unique addresses)
                 use std::collections::HashSet;
                 let mut sender_set: HashSet<String> = HashSet::new();
-                for sender in &senders {
+                for sender in &all_senders {
                     let address = utxo_to_address.get(sender).cloned().unwrap_or(sender.clone());
                     sender_set.insert(address);
                 }
@@ -1212,7 +1380,7 @@ async fn handle_check_transfer_details_request(
 
                 // Group recipients by address and sum SCL token amounts
                 let mut recipient_map: HashMap<String, u64> = HashMap::new();
-                for (utxo, amount) in &recipients {
+                for (utxo, amount) in &all_recipients {
                     let address = utxo_to_address.get(utxo).cloned().unwrap_or(utxo.clone());
                     *recipient_map.entry(address).or_insert(0) += *amount;
                 }
@@ -1220,7 +1388,7 @@ async fn handle_check_transfer_details_request(
                     .map(|(address, amount_received)| serde_json::json!({"address": address, "amount_received": amount_received}))
                     .collect();
 
-                let total_amount: u64 = recipients.iter().map(|(_, amount)| *amount).sum();
+                let total_amount: u64 = all_recipients.iter().map(|(_, amount)| *amount).sum();
 
                 let status = if !pending { "confirmed" } else { "pending" };
                 let response = serde_json::json!({
@@ -1232,9 +1400,13 @@ async fn handle_check_transfer_details_request(
                     "status": status
                 });
                 println!("[DEBUG] Returning transfer details for txid={} contract_id={} status={}", txid, contract_id, status);
-                return Ok(warp::reply::json(&response));
+                results.push(response);
             }
         }
+    }
+
+    if !results.is_empty() {
+        return Ok(warp::reply::json(&results));
     }
 
     println!("[DEBUG] Transfer not found for txid={}", txid);
